@@ -15,6 +15,22 @@
 
 參考案例:`../meumetric` 是完整 hexagonal + DDD 的實作(7 個 bounded context、shared-kernel、event bus)。該專案的複雜度在領域規則(訓練引擎、財務計算),且 4 個 app 共用同一套邏輯,完整分層划算。clacks 規模不及其十分之一,照抄即是 over-engineering。
 
+## 實作策略:Walking Skeleton 優先
+
+實作順序不是純 inside-out,而是先讓一條最細的端到端細線穿過所有高風險整合點:
+
+1. **Phase 1 — Walking skeleton**:hard-coded echo pipeline(Telegram → PTY 注入 → Stop hook → 回覆),一次驗證四個高風險假設:PTY bracketed paste 注入、Stop hook 觸發時機、`/clear` 行為、sandbox-exec 相容性。骨架位於 `skeleton/`(獨立 bin crate,不建 Tauri)
+2. **Phase 2 — 提煉 ports**:從骨架觀察到的**真實行為**定義 `ports.rs` 的 trait 語意;骨架碼整理成第一版 adapters(只搬運,不加邏輯)
+3. **Phase 3+ — inside-out**:core 純函式 → orchestrator + fake ports → 替換骨架接線 → 第二個 CLI、雙 agent 分工、儲存、GUI 逐層長上去
+
+### 骨架期護欄(不可協商)
+
+- 骨架範圍 = 最細可跑細線,不是「把整合層做完」
+- **骨架期 adapter 保持愚蠢**:只做搬運(注入、監看、收發),任何決策邏輯(重試、timeout 政策、何時 `/clear`、何時算失敗)一律留白,等 core 來填。骨架裡 `expect`/panic 是合法的
+- 骨架的整合發現(hook 實際觸發時機、sandbox 實際限制)必須寫回 `docs/superpowers/notes/`——它們是 Phase 2 port 語意的實證依據
+
+每個 phase 有自己的 implementation plan(`docs/superpowers/plans/`),前一階段的證據落地後才寫下一份,避免在猜測上做細部規劃。
+
 ## 分層與目錄結構
 
 ```
