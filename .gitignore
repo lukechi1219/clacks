@@ -1,2 +1,3 @@
 skeleton/target/
-runtime/echo/outbox/
+src-tauri/target/
+/.idea/

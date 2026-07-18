@@ -68,3 +68,14 @@
 - ✅ **非文字訊息盲點**:skeleton 只取 `msg.text`,**帶 caption 的照片(text 空、caption 有字)會被靜默丟掉**;nexus 另外處理 media/caption/location。骨架期正確(細線);taster 管線正式設計時必須明訂非文字訊息政策(拒收並告知?只取 caption?)。
 - ✅ **測試隔離(已解決)**:nexus 的目標 chat 是 @backlog_general_bot(個人 capture bot,cron 每 5 分鐘收「Luke 與它的對話」進 `raw/` 日記),clacks 不可共用。**已決定:clacks 測試用 @ChatSummary_37927_bot**,token 經 Keychain 注入 `CLACKS_BOT_TOKEN`(見設計文件「Bot token 存放」)。前提:確認沒有其他行程拿同一 token 打 `getUpdates`(否則 409 Conflict)。
 - ✅ **webhook 互斥(實測,2026-07-17)**:該 bot 原掛 Pipedream webhook,`getUpdates` 直接 409(「webhook is active」)。已徵得同意刪除;若要還原 ChatSummary 整合:`curl "https://api.telegram.org/bot<token>/setWebhook?url=https://54f734a3070a184fcf573fc53666fed6.m.pipedream.net&allowed_updates=%5B%22message%22,%22edited_message%22%5D"`。教訓:**接手既有 bot 前先 `getWebhookInfo`**——正式版 clacks 啟動時應檢查並提示,而非讓 poller 默默 409。
+
+## Phase 2 smoke(真機實測 2026-07-18)
+
+smoke bin(`src-tauri/src/bin/smoke.rs`,echo 管線全程走 ports/adapters)對照 plan Task 8 checklist:
+
+- ✅ **env_clear 最小環境下 claude 正常開機**:白名單(PATH/HOME/TERM/LANG/LC_ALL/USER/SHELL/TMPDIR)足夠,無 login/trust 要求——「顯式最小環境」的真機驗證通過,token 結構性排除確立。
+- ✅ 連續兩則訊息 ECHO 順序正確;`/clear` **立即**收到 `[smoke] control injected`(不再空等 120s timeout)——`inject_control` 不等產物的 port 語意實戰驗證。
+- ✅ outbox 只有 `*-reply.json`(5 檔),無 `.partial` 殘留——hook rename-into-place 契約 + watcher 雙接事件端到端成立。
+- ✅ **token 遮蔽實戰驗證**:smoke 期間出現瞬時 poll 錯誤,終端印出的錯誤僅 `("error sending request")`,無 URL 無 token;全程輸出檢查無 token。
+- ⚠️ **控制指令後立即注入的競態(⏳ 轉 ✅ 實證)**:`/clear` 尚在處理時注入「after clear」,得到 `ECHO: ` + 模型自行發揮(「(管線就緒,等待訊息。)」)——推定 paste 信封在 `/clear` 處理期間被 TUI 丟棄,殘留的 `\r` 送出空 prompt。重送一次即正常。骨架期「`/clear` 需給足時間再注入下一則」的觀察正式實證;**Phase 3 SessionKeeper 必須在控制指令後留緩衝**(固定延遲或狀態偵測;延遲量級未量測,列 Phase 3 量測項)。
+- ⚠️ **全域 `~/.claude` 設定滲入隔離 CLI(新發現,重要)**:echo CLI 內觸發了使用者全域 `UserPromptSubmit` hook(`timed out after 10s — output discarded` 上畫面)。成因:HOME 在 env 白名單(CLI 登入/OAuth 必需)→ 全域 settings/hooks/plugins 一併載入。含義:**隔離邊界只隔 workdir 層(CLAUDE.md/settings),不隔 user 層**——正式版 taster/cyrano 部署前提需盤點全域 hooks 對隔離角色的影響(噪音、逾時、行為改變);候選解法:專屬乾淨帳號/HOME、或 CLI 層面停用 user 設定(待查可行性),列 Phase 3+ 設計項。

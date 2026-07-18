@@ -1,0 +1,16 @@
+[package]
+name = "clacks"
+version = "0.1.0"
+edition = "2024"
+
+# 版本 pin 定承襲 skeleton/Cargo.toml 的實測值(骨架教訓:reqwest 0.12→0.13
+# feature 改名)。任何與此字面不符的調整必須在報告揭露
+[dependencies]
+notify = "8.2.0"
+portable-pty = "0.9.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "form", "json", "query", "rustls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -50,6 +50,7 @@ clacks/
 │   ├── app.rs           # orchestrator:驅動 pipeline,只依賴 core + ports
 │   └── main.rs          # composition root:唯一的組裝點(建 adapter、注入、啟動)
 ├── src/                 # React 前端 — 不分層(兩塊 xterm.js pane + 狀態顯示,保持薄)
+├── templates/           # runtime 工作目錄的版控正本(角色 CLAUDE.md、settings、hooks);部署 = cp -R 到 ../clacks-runtime/
 └── (repo 外)../clacks-runtime/   # taster/、cyrano/ 工作目錄(CLAUDE.md 角色指示、settings、outbox)
                          # 必須在 repo 目錄樹外:祖先 CLAUDE.md 遍歷跨 git 邊界,嵌套會污染
                          # 隔離 CLI 的 context(實證見 docs/superpowers/notes/2026-07-17-skeleton-findings.md)
