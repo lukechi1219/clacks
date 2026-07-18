@@ -1,0 +1,8 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORKDIR"))
+  (subpath (param "HOME_CLAUDE"))
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders"))

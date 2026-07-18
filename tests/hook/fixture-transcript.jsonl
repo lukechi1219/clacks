@@ -1,0 +1,4 @@
+{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"first reply"}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"again"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"ECHO: second reply"}]}}

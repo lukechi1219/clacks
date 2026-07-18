@@ -1,5 +1,7 @@
 # Walking Skeleton(Phase 1)Implementation Plan
 
+> **執行後修正(2026-07-17)**:真機驗證發現 CLI 工作目錄嵌在 repo 內會被祖先 CLAUDE.md 污染(角色失效),工作目錄已移至 repo 外 `../clacks-runtime/echo/`——本文件中所有 `runtime/echo` 路徑均以此為準,skeleton 程式碼已同步。另:E2E 首跑發現 `\r` 與 paste 信封同寫不觸發送出,`bracketed_paste` 契約已改為不含 `\r`(caller 延遲後單獨送);telegram adapter 的 expect 前先 `without_url()` 遮 token。實證與裁決見 [skeleton findings](../notes/2026-07-17-skeleton-findings.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 一條 hard-coded echo pipeline 細線:Telegram 訊息 → PTY 注入互動式 claude CLI → Stop hook 寫 outbox → 回覆 Telegram,一次驗證四個高風險整合假設(bracketed paste、Stop hook 觸發時機、`/clear` 行為、sandbox-exec)。
@@ -147,10 +149,12 @@ git commit -m "骨架 Task 1:crate 腳手架與 bracketed paste 純函式"
 - [ ] **Step 1: 加依賴**
 
 ```bash
-cargo add --manifest-path skeleton/Cargo.toml reqwest --features blocking,json,rustls-tls --no-default-features
+cargo add --manifest-path skeleton/Cargo.toml reqwest --no-default-features --features blocking,json,form,query,rustls
 cargo add --manifest-path skeleton/Cargo.toml serde --features derive
 cargo add --manifest-path skeleton/Cargo.toml serde_json
 ```
+
+(reqwest 0.13 起 `rustls-tls` 更名為 `rustls`,`.form()`/`.query()` 各自成為 opt-in feature;TLS 憑證由 rustls-platform-verifier 走 macOS 系統信任庫,不需額外 roots feature。)
 
 - [ ] **Step 2: 寫失敗測試(offset 推進是唯一純邏輯)**
 
@@ -480,6 +484,8 @@ pub fn spawn_claude(workdir: &str) -> CliPty {
         .expect("openpty");
 
     let mut cmd = CommandBuilder::new("claude");
+    // 安全約束:portable-pty 預設繼承整個父環境,bot token 絕不能進 CLI 子行程
+    cmd.env_remove("CLACKS_BOT_TOKEN");
     cmd.cwd(workdir);
     // 不用 --settings:CLI 自動載入 workdir 的 .claude/settings.json,並用會雙重註冊 hook
     let child = pair.slave.spawn_command(cmd).expect("spawn claude");
