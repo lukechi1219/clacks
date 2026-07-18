@@ -4,7 +4,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::outbox::watch_outbox;
 
@@ -42,7 +42,7 @@ pub struct ClaudePtySession {
     artifact_rx: Receiver<PathBuf>,
     _watcher: RecommendedWatcher,
     _master: Box<dyn MasterPty + Send>,
-    _child: Box<dyn Child + Send + Sync>,
+    child: Box<dyn Child + Send + Sync>,
 }
 
 impl ClaudePtySession {
@@ -51,6 +51,15 @@ impl ClaudePtySession {
     /// 呼叫端(composition root)負責給對路徑
     pub fn spawn(
         workdir: &Path,
+        output: Box<dyn Write + Send>,
+    ) -> Result<Self, CliError> {
+        Self::spawn_program(&["claude"], workdir, output)
+    }
+
+    /// 測試縫:teardown 測試以 sleep/sh 代替 claude。生產路徑只走 spawn
+    fn spawn_program(
+        argv: &[&str],
+        workdir: &Path,
         mut output: Box<dyn Write + Send>,
     ) -> Result<Self, CliError> {
         let pty_system = native_pty_system();
@@ -58,7 +67,8 @@ impl ClaudePtySession {
             .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| CliError(e.to_string()))?;
 
-        let mut cmd = CommandBuilder::new("claude");
+        let mut cmd = CommandBuilder::new(argv[0]);
+        cmd.args(&argv[1..]);
         // 一級安全約束落點:清空繼承環境,只放行白名單(token 結構性排除)
         cmd.env_clear();
         for (key, value) in minimal_env(std::env::vars()) {
@@ -99,7 +109,7 @@ impl ClaudePtySession {
             artifact_rx,
             _watcher: watcher,
             _master: master,
-            _child: child,
+            child,
         })
     }
 
@@ -108,6 +118,34 @@ impl ClaudePtySession {
         // 真機實證:paste 信封與 \r 同寫不送出,需延遲後單獨送
         std::thread::sleep(Duration::from_millis(150));
         self.write_raw(b"\r")
+    }
+
+    /// 顯式 teardown(Phase 3 一級任務,使用者裁決):kill + 有界等待 + 升級。
+    /// portable-pty 0.9.0 unix kill() 送 SIGHUP——攔截 HUP 的 child 不會死;
+    /// Child 亦不保證 kill-on-drop。SIGHUP 未在期限內生效即升級 SIGKILL
+    /// (不可攔),wait 收屍避免 zombie
+    fn teardown(&mut self) {
+        let _ = self.child.kill(); // unix: SIGHUP
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return, // 已退出並收屍
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => break,
+            }
+        }
+        if let Some(pid) = self.child.process_id() {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+impl Drop for ClaudePtySession {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 
@@ -172,5 +210,48 @@ mod tests {
     #[test]
     fn empty_text_still_produces_envelope() {
         assert_eq!(bracketed_paste(""), b"\x1b[200~\x1b[201~");
+    }
+
+    /// pgrep 等價檢查:ps -p 對已 reap 的 pid 回非零 exit code
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    // teardown 一級任務(2026-07-18 裁決):session 丟棄後不得殘留子行程
+    #[test]
+    fn drop_kills_child_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = ClaudePtySession::spawn_program(
+            &["sleep", "300"],
+            dir.path(),
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let pid = session.child.process_id().expect("child 應有 pid");
+        assert!(process_alive(pid));
+        drop(session);
+        assert!(!process_alive(pid), "teardown 後不得有殘留行程");
+    }
+
+    // portable-pty 的 kill() 送 SIGHUP(0.9.0 實證)——攔截 HUP 的行程
+    // 必須被升級的 SIGKILL 收掉。sh 迴圈裡的 sleep 1 孫行程會在 1s 內
+    // 自然退出,不列入斷言
+    #[test]
+    fn drop_escalates_to_sigkill_when_sighup_trapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "trap '' HUP; while :; do sleep 1; done"],
+            dir.path(),
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let pid = session.child.process_id().expect("child 應有 pid");
+        assert!(process_alive(pid));
+        drop(session); // SIGHUP 被攔 → 有界等待 → SIGKILL
+        assert!(!process_alive(pid), "SIGHUP 免疫的行程必須被 SIGKILL 收掉");
     }
 }
