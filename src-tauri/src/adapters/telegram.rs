@@ -81,6 +81,8 @@ impl TelegramGateway for TelegramHttp {
             .query(&[("offset", offset.to_string()), ("timeout", "30".to_string())])
             .send()
             .map_err(Self::redact)?
+            .error_for_status()
+            .map_err(Self::redact)?
             .json()
             .map_err(Self::redact)?;
         Ok(resp
@@ -101,6 +103,8 @@ impl TelegramGateway for TelegramHttp {
             .post(self.url("sendMessage"))
             .form(&[("chat_id", chat_id.to_string()), ("text", text.to_string())])
             .send()
+            .map_err(Self::redact)?
+            .error_for_status()
             .map_err(Self::redact)?;
         Ok(())
     }
@@ -110,6 +114,8 @@ impl TelegramGateway for TelegramHttp {
             .http
             .get(self.url("getWebhookInfo"))
             .send()
+            .map_err(Self::redact)?
+            .error_for_status()
             .map_err(Self::redact)?
             .json()
             .map_err(Self::redact)?;
@@ -200,6 +206,58 @@ mod tests {
         server.join().expect("stub server thread panicked");
 
         for err in [poll_err, webhook_err] {
+            let shown = format!("{err:?}");
+            assert!(!shown.contains("SECRET123TOKEN"), "token leaked: {shown}");
+        }
+    }
+
+    // release-gating(findings「Phase 4 規劃承接項」):非 2xx 必須成為 GatewayError,
+    // send_reply 不得靜默 Ok。stub 回 500,token 仍在 request URL(path)——redact 必須遮蔽
+    #[test]
+    fn non_2xx_becomes_gateway_error_without_token() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("read local addr");
+
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept connection");
+                let mut received = Vec::new();
+                let mut chunk = [0u8; 512];
+                loop {
+                    let n = stream.read(&mut chunk).expect("read request");
+                    if n == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&chunk[..n]);
+                    if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = b"nope";
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).expect("write headers");
+                stream.write_all(body).expect("write body");
+                stream.flush().expect("flush");
+            }
+        });
+
+        let client = TelegramHttp::new("SECRET123TOKEN".to_string(), format!("http://{addr}"));
+
+        // 關鍵回歸:send_reply 對 500 必須回 Err(先前靜默 Ok);
+        // 三個 API 方法的 status-error 分支全數覆蓋(遮蔽測試窮舉每個 map_err 點)
+        let send_err = client.send_reply(1, "hi").unwrap_err();
+        let poll_err = client.poll_updates(0).unwrap_err();
+        let webhook_err = client.webhook_url().unwrap_err();
+
+        server.join().expect("stub server thread panicked");
+
+        for err in [send_err, poll_err, webhook_err] {
             let shown = format!("{err:?}");
             assert!(!shown.contains("SECRET123TOKEN"), "token leaked: {shown}");
         }

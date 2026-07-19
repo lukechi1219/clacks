@@ -1075,8 +1075,9 @@ git commit -m "feat: sandbox-exec profile 正本——檔案系統隔離 + /dev/
   - `drop_escalates_to_sigkill_when_sighup_trapped` 與 `respawn_kills_old_child_and_starts_new` 因有界等待/行程起落約各需 1–2s,屬正常
 - **Hook 迴歸**:`bash tests/hook/test_extract_reply.sh` → PASS×2(本 phase 未改 echo hook;taster/cyrano hook 與 echo 逐字相同,以 diff 驗證於 Task 4/5)
 - **依賴規則掃描(掃 `^use` 陳述,非註解——Phase 3 教訓:rg 命中 doc comment 是假陽性)**:
-  - `rg -n '^use ' src-tauri/src/core/*.rs | rg 'tokio|tauri|notify|portable_pty|reqwest|rusqlite'` → 無輸出(core 未被本 phase 污染,迴歸)
-  - `rg -n '^use ' src-tauri/src/app.rs | rg 'adapters|portable_pty|rusqlite|notify|reqwest|tokio|tauri'` → 無輸出(orchestrator 只 core + ports)
+  - `rg -n '^use (tokio|tauri|notify|portable_pty|reqwest|rusqlite)' src-tauri/src/core/` → 無輸出(core 未被本 phase 污染,迴歸)
+  - `rg -n '^use (crate::adapters|portable_pty|rusqlite|notify|reqwest|tokio|tauri)' src-tauri/src/app.rs` → 無輸出(orchestrator 只 core + ports)
+  - (rg 第三課:多檔輸出帶檔名前綴,路徑 `src-tauri` 含 `tauri`——管線式兩段 rg 必假陽性;pattern 要錨定在 use 目標上,不掃輸出行全文)
 - **安全紅線**:
   - `telegram.rs` 的 `redact`/`without_url` 與 `errors_never_contain_token`、`decode_errors_never_contain_token` 原樣健在(Task 1 只加不改)
   - `pty.rs` 的 `env_clear` + `ENV_ALLOWLIST` 與 `minimal_env_excludes_secrets_and_unknowns` 原樣健在(Task 2 紅線)
@@ -1084,3 +1085,238 @@ git commit -m "feat: sandbox-exec profile 正本——檔案系統隔離 + /dev/
 - **依賴無新增(Global Constraints 8)**:`git diff --stat src-tauri/Cargo.toml src-tauri/Cargo.lock` 無 `[dependencies]` 新增(若有,揭露 + pin)
 - **composition root 可編譯**:`cargo build --manifest-path src-tauri/Cargo.toml --bin pipeline` → `Finished`
 - **真機承接項(Task 9 human 記錄)**:安全義務(SessionLost→taster 乾淨)、release-gating(非 2xx→Err)、CLI 真機驗證項(cyrano `--continue`、settings 權限語法、CONTROL_BUFFER 量級、~/.claude 隔離)均有真機實測記錄或明確 fallback 裁決
+
+---
+
+### Task 10: CLAUDE_CONFIG_DIR 佈線(Task 7 裁決落地,執行序在 Task 9 之前)
+
+**Files:**
+- Modify: `src-tauri/src/adapters/pty.rs`(spawn/spawn_continue/spawn_program 加 config_dir 參數 + 欄位 + 測試)
+- Modify: `src-tauri/src/bin/smoke.rs`(呼叫端加 None——legacy echo 不隔離)
+- Modify: `src-tauri/src/bin/pipeline.rs`(taster/cyrano 指向共用 cli-config + pre-seed 檢查)
+
+**背景(必讀)**:Task 7 真機裁決——`CLAUDE_CONFIG_DIR` 部分隔離(隔 MCP/model/plugins/settings/OAuth,不隔 user 全域 CLAUDE.md)。本任務把機制佈線進 spawn,讓 taster/cyrano 用隔離 config,消掉 user 層 MCP banner、plugin hooks、model/effort 滲入。
+
+**設計決策(controller 裁決,findings Task 7)**:taster 與 cyrano **共用一個 config dir**(`../clacks-runtime/cli-config`),非各一。理由:同帳號對多個 config dir 各自登入會觸發 OAuth refresh-reuse 保護、撤銷整個 token family(使用者既有事故)。共用 = 單次登入避風險;角色隔離(deny 工具)靠 **workdir** 層 settings,與 config dir 無關。並發共用安全(等同真實 `~/.claude` 被多實例共用的常態)。
+
+**約束落點:**
+- **安全紅線(Global Constraints 1)**:config_dir 經 `cmd.env("CLAUDE_CONFIG_DIR", ...)` 在 `env_clear` + 白名單迴圈**之後**顯式設定——不改 `env_clear`/`ENV_ALLOWLIST`、不動 token 排除;`minimal_env_excludes_secrets_and_unknowns` 原樣。config_dir 是顯式受控變數,非繼承。
+- **teardown 必經(Global Constraints 3)**:config_dir 存入 struct 供 respawn 重用(重啟仍指向同 config)。
+- **CLI 行為真機驗證項(Global Constraints 9)**:sessions 是否以 cwd(非 config dir)為鍵——共用 config 下 taster/cyrano session 不得互串;`--continue` 恢復的是 cyrano workdir 的 session——列 Task 9 驗證,不斷言。
+- **依賴不新增**:只用 std。
+
+**Interfaces:**
+- Produces:`spawn`/`spawn_continue` 簽名加 `config_dir: Option<&Path>`(None = 不設 CLAUDE_CONFIG_DIR,沿用預設 `~/.claude`——legacy 相容);`ClaudePtySession` 加欄位 `config_dir: Option<PathBuf>`
+
+- [ ] **Step 1: pty.rs 測試先行(RED)**
+
+在 `mod tests` 追加(與既有 teardown 測試同款真實行程 + tempdir):
+
+```rust
+    // Task 10:config_dir = Some 時,子行程環境必須有 CLAUDE_CONFIG_DIR
+    #[test]
+    fn config_dir_sets_env_for_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "printf '%s' \"$CLAUDE_CONFIG_DIR\" > cfg-probe.txt"],
+            vec!["sh".to_string()],
+            dir.path(),
+            Some(cfg.path()),
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let probe = dir.path().join("cfg-probe.txt");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !probe.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(session);
+        assert_eq!(
+            std::fs::read_to_string(&probe).unwrap(),
+            cfg.path().to_string_lossy()
+        );
+    }
+
+    // config_dir = None 時,子行程不得有 CLAUDE_CONFIG_DIR(env_clear + 白名單不含它)
+    #[test]
+    fn no_config_dir_leaves_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "printf 'val=[%s]' \"${CLAUDE_CONFIG_DIR:-UNSET}\" > cfg-probe.txt"],
+            vec!["sh".to_string()],
+            dir.path(),
+            None,
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let probe = dir.path().join("cfg-probe.txt");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !probe.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(session);
+        assert_eq!(std::fs::read_to_string(&probe).unwrap(), "val=[UNSET]");
+    }
+```
+
+同時把既有三個直呼 `spawn_program` 的測試(`drop_kills_child_process`、`drop_escalates_to_sigkill_when_sighup_trapped`、`respawn_kills_old_child_and_starts_new`)的呼叫在 `workdir` 與 `output` 之間插入 `None,`(config_dir 參數)。例:
+
+```rust
+        let session = ClaudePtySession::spawn_program(
+            &["sleep", "300"],
+            vec!["sleep".to_string(), "300".to_string()],
+            dir.path(),
+            None,
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+```
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml adapters::pty`
+Expected: 編譯失敗(spawn_program 尚是 4 參數)——這一步的 RED 是編譯錯誤,屬預期
+
+- [ ] **Step 2: pty.rs 實作 config_dir**
+
+struct 加欄位(在 `respawn_argv` 之後):
+
+```rust
+    respawn_argv: Vec<String>,
+    /// 隔離用 config 目錄(Task 7 裁決:CLAUDE_CONFIG_DIR)。None = 用預設 ~/.claude
+    config_dir: Option<PathBuf>,
+```
+
+`spawn` / `spawn_continue` 加 `config_dir: Option<&Path>` 參數並下傳:
+
+```rust
+    pub fn spawn(
+        workdir: &Path,
+        config_dir: Option<&Path>,
+        output: Box<dyn Write + Send>,
+    ) -> Result<Self, CliError> {
+        Self::spawn_program(&["claude"], vec!["claude".to_string()], workdir, config_dir, output)
+    }
+
+    pub fn spawn_continue(
+        workdir: &Path,
+        config_dir: Option<&Path>,
+        output: Box<dyn Write + Send>,
+    ) -> Result<Self, CliError> {
+        Self::spawn_program(
+            &["claude"],
+            vec!["claude".to_string(), "--continue".to_string()],
+            workdir,
+            config_dir,
+            output,
+        )
+    }
+```
+
+`spawn_program` 加參數、顯式設 env、存欄位:
+
+```rust
+    fn spawn_program(
+        argv: &[&str],
+        respawn_argv: Vec<String>,
+        workdir: &Path,
+        config_dir: Option<&Path>,
+        mut output: Box<dyn Write + Send>,
+    ) -> Result<Self, CliError> {
+```
+
+在 `for (key, value) in minimal_env(...) { cmd.env(key, value); }` 之後、`cmd.cwd(workdir);` 之前插入:
+
+```rust
+        // Task 7 裁決:CLAUDE_CONFIG_DIR 隔離 user 層 settings/MCP/plugins。
+        // 在 env_clear + 白名單之後顯式設定——受控變數,非繼承(不觸 token 排除紅線)
+        if let Some(cfg) = config_dir {
+            cmd.env("CLAUDE_CONFIG_DIR", cfg);
+        }
+```
+
+struct 建構補欄位(在 `respawn_argv` 之後):
+
+```rust
+            respawn_argv,
+            config_dir: config_dir.map(Path::to_path_buf),
+```
+
+`respawn` 內傳 `self.config_dir`(在既有 `respawn` 方法中,`spawn_program` 呼叫加 config_dir 參數):
+
+```rust
+        let config_dir = self.config_dir.clone();
+        let fresh = Self::spawn_program(
+            &argv,
+            respawn_argv.clone(),
+            &workdir,
+            config_dir.as_deref(),
+            Box::new(std::io::sink()),
+        )?;
+```
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml adapters::pty`
+Expected: 全綠(含兩個新測試),無 warning。`minimal_env_excludes_secrets_and_unknowns` 原樣通過
+
+- [ ] **Step 3: smoke.rs 呼叫端加 None(legacy 不隔離)**
+
+`smoke.rs` 對 `ClaudePtySession::spawn(runtime, ...)` 的呼叫,在 workdir 與 output 之間插入 `None,`(echo smoke 沿用預設 config,不變行為):
+
+```rust
+    let mut session = ClaudePtySession::spawn(&runtime, None, Box::new(std::io::stdout()))
+        .expect("spawn echo");
+```
+
+(以 smoke.rs 現有變數名為準;若變數名不同,只加 `None,` 參數即可)
+
+Run: `cargo build --manifest-path src-tauri/Cargo.toml --bin smoke`
+Expected: `Finished`,無 warning
+
+- [ ] **Step 4: pipeline.rs 指向共用 cli-config + pre-seed 檢查**
+
+在 `pipeline.rs` 的 runtime 目錄檢查之後、`TelegramHttp::from_env()` 之前,加共用 config 的 pre-seed 檢查:
+
+```rust
+    // Task 7 裁決:CLAUDE_CONFIG_DIR 隔離(taster/cyrano 共用一個 config,
+    // 同帳號單次登入避開 token family 輪替風險)。全新 config dir 會跳
+    // onboarding/login/trust 對話框——headless 無法通過,必須先互動 pre-seed
+    let cli_config = Path::new("../clacks-runtime/cli-config");
+    if !cli_config.join(".claude.json").exists() {
+        eprintln!(
+            "[clacks] CLI config 未 pre-seed:{}\n\
+             headless spawn 無法通過 onboarding/login/trust 對話框。先互動完成一次\
+             (兩個 workdir 各跑一次以信任各自資料夾,共用同一 config 只需登入一次):\n  \
+             CLAUDE_CONFIG_DIR=\"$(cd \"$(dirname \"$0\")\" 2>/dev/null; pwd)/{}\" \
+             (在 taster workdir 跑 claude 完成 theme/login/trust,再於 cyrano workdir 跑一次)",
+            cli_config.display(),
+            cli_config.display()
+        );
+        std::process::exit(1);
+    }
+```
+
+taster / cyrano 的 spawn 加 `Some(cli_config)`:
+
+```rust
+    let mut taster = ClaudePtySession::spawn(taster_dir, Some(cli_config), Box::new(std::io::stdout()))
+        .expect("spawn taster");
+    let mut cyrano = ClaudePtySession::spawn_continue(cyrano_dir, Some(cli_config), Box::new(std::io::stdout()))
+        .expect("spawn cyrano");
+```
+
+Run: `cargo build --manifest-path src-tauri/Cargo.toml --bin pipeline`
+Expected: `Finished`,無 warning
+
+- [ ] **Step 5: 全套件 GREEN + 紅線**
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml`
+Expected: 全綠(既有 77 + 兩個新 pty 測試 = 79),無 warning
+
+Run: `rg -n 'env_clear|ENV_ALLOWLIST' src-tauri/src/adapters/pty.rs`
+Expected: 仍在(未移除)——token 結構性排除紅線未動
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src-tauri/src/adapters/pty.rs src-tauri/src/bin/smoke.rs src-tauri/src/bin/pipeline.rs
+git commit -m "feat: CLAUDE_CONFIG_DIR 佈線——taster/cyrano 共用隔離 config(Task 7 裁決,顯式 env 不觸 token 紅線)"
+```

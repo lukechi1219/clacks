@@ -35,6 +35,10 @@ pub struct Orchestrator<'a> {
     /// 注入的 sleep(測試用記錄替身;生產給 std::thread::sleep)。
     /// 不設第 5 個 port——睡眠不是領域介面,是解譯器的執行細節
     sleep: Box<dyn FnMut(Duration) + 'a>,
+    /// taster respawn 失敗後設 true:taster 可能仍活著且髒(持有前一則
+    /// 不可信訊息 context)。process_update 開頭 fail-closed 拒收新訊息
+    /// 直到恢復成功(final review Important:安全義務補洞)
+    taster_dirty: bool,
 }
 
 enum ExecError {
@@ -53,11 +57,21 @@ impl<'a> Orchestrator<'a> {
         config: PipelineConfig,
         sleep: Box<dyn FnMut(Duration) + 'a>,
     ) -> Self {
-        Self { gateway, taster, cyrano, store, config, sleep }
+        Self { gateway, taster, cyrano, store, config, sleep, taster_dirty: false }
     }
 
     /// 一則 update 走完整管線。None = update_id 已見過(去重跳過)
     pub fn process_update(&mut self, update: &Update) -> Option<MessageOutcome> {
+        if self.taster_dirty {
+            // 安全義務(fail-closed):上次恢復的 taster respawn 失敗,taster 可能
+            // 仍持有前一則不可信訊息的 context——重試恢復,仍失敗則本則不處理、
+            // 訊息丟棄(poll_once 已推進 offset,Telegram 端隨下次 getUpdates 確認
+            // 即丟——與其他終局失敗一致;寧丟勿注入髒 taster)
+            self.recover();
+            if self.taster_dirty {
+                return Some(MessageOutcome::SessionLost);
+            }
+        }
         match self.store.first_seen(update.update_id) {
             // fail-closed:去重狀態不明時不處理(重覆回覆的風險大於漏回)
             Err(error) => return Some(MessageOutcome::StoreFailed(error.0)),
@@ -93,7 +107,14 @@ impl<'a> Orchestrator<'a> {
                 continue;
             }
             if let Some(outcome) = pipeline.outcome() {
-                return Some(outcome.clone());
+                let outcome = outcome.clone();
+                if outcome == MessageOutcome::SessionLost {
+                    // 安全義務(2026-07-18 裁定):SessionLost 不記名哪個 session 死,
+                    // 兩個一起重啟——taster 重啟 = 全新 = 乾淨(消毒者無記憶不可破),
+                    // cyrano 以 --continue 續談(adapter 內建)。恢復必經 Phase 3 teardown
+                    self.recover();
+                }
+                return Some(outcome);
             }
             let target = pipeline.awaiting().expect("非終態必有等待對象");
             let event = self.wait_on(target);
@@ -168,6 +189,23 @@ impl<'a> Orchestrator<'a> {
                 .gateway
                 .send_reply(chat_id, &text)
                 .map_err(|error| ExecError::Send(error.0)),
+        }
+    }
+
+    /// SessionLost 恢復:兩個 session 一起重啟(findings「Phase 4 規劃承接項」)。
+    /// taster respawn 失敗 = taster 可能仍活著且髒——設 taster_dirty,
+    /// process_update 開頭會先重試並在成功前拒絕處理(fail-closed,安全義務);
+    /// cyrano respawn 失敗可自癒(若 cyrano 真死,下次 wait 即 Lost 再觸發 recover)
+    fn recover(&mut self) {
+        match self.taster.respawn() {
+            Ok(()) => self.taster_dirty = false,
+            Err(error) => {
+                self.taster_dirty = true;
+                eprintln!("[clacks] taster 重啟失敗(髒 taster 拒收新訊息直到恢復):{}", error.0);
+            }
+        }
+        if let Err(error) = self.cyrano.respawn() {
+            eprintln!("[clacks] cyrano 重啟失敗(下次 Lost 重試):{}", error.0);
         }
     }
 

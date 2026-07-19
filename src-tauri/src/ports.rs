@@ -79,6 +79,15 @@ pub trait CliSession {
     fn wait_artifact(&mut self, timeout: Duration) -> Result<Artifact, WaitError>;
     /// 原樣寫入 PTY,不加信封、不觸發送出
     fn write_raw(&mut self, bytes: &[u8]) -> Result<(), CliError>;
+
+    /// 重啟 session:teardown 當前 child(Phase 3 kill+wait 保證無殘留)後起新的。
+    ///
+    /// - taster 重啟 = 全新 PTY + 全新 session 檔 = **乾淨**(消毒者無記憶,安全義務)
+    /// - cyrano 重啟以 `claude --continue` 續談(設計文件錯誤處理)——**真機驗證項**:
+    ///   `--continue` 能否恢復對話待真機證實,失敗 fallback 為全新 session 並記錄
+    ///
+    /// 失敗(建新 session 失敗)時 self 維持原狀,回 Err 供 orchestrator 記錄並於下則訊息重試
+    fn respawn(&mut self) -> Result<(), CliError>;
 }
 
 // ---------- Store / Clock ----------

@@ -249,6 +249,125 @@ fn taster_inject_failure_is_session_lost() {
 }
 
 #[test]
+fn session_lost_restarts_both_keeping_taster_clean() {
+    // 安全義務(findings「Phase 4 規劃承接項」):cyrano 在安全路徑注入失敗 →
+    // 健康 taster 帶著剛判定的訊息 context 停留 = 消毒者無記憶被打破。
+    // 恢復必須讓 taster 乾淨(重啟為全新 session)
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    let mut cyrano = ScriptedCli::new(vec![]);
+    cyrano.fail_next_inject = true; // cyrano 注入即死(安全路徑上失敗)
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let outcome = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.process_update(&text_update(1, 42, "hi"))
+    };
+
+    assert_eq!(outcome, Some(MessageOutcome::SessionLost));
+    assert_eq!(taster.respawns, 1, "健康 taster 必須一併重啟以保證乾淨");
+    assert!(taster.messages.is_empty(), "重啟後 taster 不得殘留訊息 context");
+    assert_eq!(cyrano.respawns, 1, "死掉的 cyrano 必須重啟");
+    assert!(gateway.sent.borrow().is_empty());
+}
+
+#[test]
+fn taster_loss_at_start_restarts_both() {
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![]);
+    taster.fail_next_inject = true; // 起手注入即死
+    let mut cyrano = ScriptedCli::new(vec![]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let outcome = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.process_update(&text_update(1, 42, "hi"))
+    };
+
+    assert_eq!(outcome, Some(MessageOutcome::SessionLost));
+    assert_eq!(taster.respawns, 1);
+    assert_eq!(cyrano.respawns, 1);
+}
+
+#[test]
+fn failed_taster_respawn_blocks_next_message() {
+    // final review Important:taster respawn 失敗 = taster 可能仍活著且髒
+    // (持有前一則不可信訊息 context)。下一則訊息絕不能被注入到髒 taster——
+    // 這是「消毒者無記憶」的安全義務,fail-closed 優先於可用性。
+    //
+    // 注意(deviation from spec):taster_dirty 活在 Orchestrator 本身(不是
+    // fakes),兩次 process_update 必須在同一個 orchestrator 實例上呼叫才能
+    // 驗證跨呼叫的 fail-closed 行為——比照既有 duplicate_update_processed_once
+    // 的寫法,兩次呼叫都在同一個 scope block 內,離開 block 後才檢查 fakes。
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    taster.fail_respawns = 2; // 第一次(mid-loop recover)與第二次(頂部重試)都失敗
+    let mut cyrano = ScriptedCli::new(vec![]);
+    cyrano.fail_next_inject = true; // 安全路徑上死亡,觸發第一次 recover
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let (first, second) = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        let first = orchestrator.process_update(&text_update(1, 42, "第一則"));
+        let second = orchestrator.process_update(&text_update(2, 42, "第二則"));
+        (first, second)
+    };
+
+    assert_eq!(first, Some(MessageOutcome::SessionLost));
+    assert_eq!(
+        second,
+        Some(MessageOutcome::SessionLost),
+        "頂部重試恢復仍失敗,fail-closed 拒收本則"
+    );
+    assert_eq!(taster.respawns, 0, "兩次 respawn 都失敗,成功計數不動");
+    assert_eq!(
+        taster.messages.len(),
+        1,
+        "安全斷言核心:髒 taster 絕不可收到第二則訊息(respawn 未成功清空前)"
+    );
+}
+
+#[test]
+fn taster_recovers_on_retry_then_processes() {
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    taster.fail_respawns = 1; // 只有第一次(mid-loop recover)失敗,頂部重試成功
+    let mut cyrano = ScriptedCli::new(vec![]);
+    cyrano.fail_next_inject = true;
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let (first, second) = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        let first = orchestrator.process_update(&text_update(1, 42, "第一則"));
+        let second = orchestrator.process_update(&text_update(2, 42, "next"));
+        (first, second)
+    };
+
+    assert_eq!(first, Some(MessageOutcome::SessionLost));
+    // 頂部重試成功 → 正常處理 → taster 腳本已耗盡(只給了一個 artifact)→ timeout
+    assert_eq!(second, Some(MessageOutcome::TasterTimeout));
+    assert_eq!(taster.respawns, 1, "重試恢復成功,respawn 計數才前進");
+    assert_eq!(taster.messages.len(), 1, "清空後只收到 update 2 的訊息(重新注入)");
+    assert!(taster.messages[0].contains("next"));
+}
+
+#[test]
 fn poll_once_advances_offset_and_processes_each_update() {
     let gateway = FakeGateway::new();
     gateway.script_poll(Ok(vec![

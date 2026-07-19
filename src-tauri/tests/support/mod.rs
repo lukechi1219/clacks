@@ -64,6 +64,10 @@ pub struct ScriptedCli {
     pub raw_writes: Vec<Vec<u8>>,
     /// true 時下一次 inject_message 失敗(單發)
     pub fail_next_inject: bool,
+    /// respawn 呼叫次數(安全義務測試斷言用)
+    pub respawns: u32,
+    /// >0 時下 N 次 respawn 失敗(每次呼叫遞減);耗盡後恢復正常 respawn
+    pub fail_respawns: u32,
 }
 
 impl ScriptedCli {
@@ -74,6 +78,8 @@ impl ScriptedCli {
             controls: vec![],
             raw_writes: vec![],
             fail_next_inject: false,
+            respawns: 0,
+            fail_respawns: 0,
         }
     }
 }
@@ -100,6 +106,18 @@ impl CliSession for ScriptedCli {
 
     fn write_raw(&mut self, bytes: &[u8]) -> Result<(), CliError> {
         self.raw_writes.push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn respawn(&mut self) -> Result<(), CliError> {
+        if self.fail_respawns > 0 {
+            self.fail_respawns -= 1;
+            return Err(CliError("scripted respawn failure".to_string()));
+        }
+        self.respawns += 1;
+        // 替身的「全新 session」語意:清空已注入紀錄(消毒者無記憶 = 乾淨)
+        self.messages.clear();
+        self.controls.clear();
         Ok(())
     }
 }

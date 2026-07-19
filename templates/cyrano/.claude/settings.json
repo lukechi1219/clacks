@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "NotebookEdit"
+    ],
+    "allow": [
+      "Read"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/extract-reply.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

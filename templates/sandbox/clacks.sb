@@ -1,0 +1,24 @@
+;; clacks OS sandbox profile(sandbox-exec -f)。
+;; 以 skeleton 實證正本(2026-07-17-sandbox-echo.sb.example)為底,補 skeleton
+;; 抓到的 /dev/null 缺口(deny file-write* 曾擋掉 hook 的 /dev/null 寫入)。
+;;
+;; 檔案系統隔離為主(唯讀為預設,寫入白名單);網路無法全禁(claude 必須連
+;; Anthropic API)——allow default 保留網路,隔離靠檔案系統層(設計文件裁決)。
+;;
+;; 參數(呼叫端以 -D 傳入):
+;;   WORKDIR      = runtime 工作目錄(../clacks-runtime/taster 或 cyrano)
+;;   HOME_CLAUDE  = ~/.claude(OAuth、設定)
+;; 例:sandbox-exec -D WORKDIR=$(pwd)/../clacks-runtime/taster \
+;;                  -D HOME_CLAUDE="$HOME/.claude" -f templates/sandbox/clacks.sb claude
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORKDIR"))
+  (subpath (param "HOME_CLAUDE"))
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  ;; skeleton 缺口修正:hook 與工具鏈需寫這些 device,否則靜默失敗
+  (literal "/dev/null")
+  (literal "/dev/tty")
+  (literal "/dev/dtracehelper"))

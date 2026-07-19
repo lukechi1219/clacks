@@ -29,7 +29,7 @@ fn main() {
         }
     }
 
-    let mut cli = ClaudePtySession::spawn(runtime, Box::new(std::io::stdout()))
+    let mut cli = ClaudePtySession::spawn(runtime, None, Box::new(std::io::stdout()))
         .expect("spawn claude");
 
     println!("\n[smoke] waiting 15s for CLI boot");

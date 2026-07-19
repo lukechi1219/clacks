@@ -43,23 +43,47 @@ pub struct ClaudePtySession {
     _watcher: RecommendedWatcher,
     _master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    /// 重啟需要的組態(重啟 = 就地重建同 workdir 的新 session)
+    workdir: PathBuf,
+    respawn_argv: Vec<String>,
+    /// 隔離用 config 目錄(Task 7 裁決:CLAUDE_CONFIG_DIR)。None = 用預設 ~/.claude
+    config_dir: Option<PathBuf>,
 }
 
 impl ClaudePtySession {
     /// output:PTY 輸出的去向(骨架/smoke 用 stdout;GUI 期換成事件流)。
     /// workdir 必須在 repo 目錄樹外(祖先 CLAUDE.md 污染,骨架實證)——
-    /// 呼叫端(composition root)負責給對路徑
+    /// 呼叫端(composition root)負責給對路徑。重啟仍為純 `claude`(taster 語意)
     pub fn spawn(
         workdir: &Path,
+        config_dir: Option<&Path>,
         output: Box<dyn Write + Send>,
     ) -> Result<Self, CliError> {
-        Self::spawn_program(&["claude"], workdir, output)
+        Self::spawn_program(&["claude"], vec!["claude".to_string()], workdir, config_dir, output)
     }
 
-    /// 測試縫:teardown 測試以 sleep/sh 代替 claude。生產路徑只走 spawn
+    /// cyrano 專用:首次啟動全新對話,重啟以 `claude --continue` 續談。
+    /// 真機驗證項(Task 9):`--continue` 能否恢復對話待證實,失敗 fallback = 全新 session
+    pub fn spawn_continue(
+        workdir: &Path,
+        config_dir: Option<&Path>,
+        output: Box<dyn Write + Send>,
+    ) -> Result<Self, CliError> {
+        Self::spawn_program(
+            &["claude"],
+            vec!["claude".to_string(), "--continue".to_string()],
+            workdir,
+            config_dir,
+            output,
+        )
+    }
+
+    /// 測試縫:teardown/respawn 測試以 sleep/sh 代替 claude。生產路徑走 spawn/spawn_continue
     fn spawn_program(
         argv: &[&str],
+        respawn_argv: Vec<String>,
         workdir: &Path,
+        config_dir: Option<&Path>,
         mut output: Box<dyn Write + Send>,
     ) -> Result<Self, CliError> {
         let pty_system = native_pty_system();
@@ -73,6 +97,11 @@ impl ClaudePtySession {
         cmd.env_clear();
         for (key, value) in minimal_env(std::env::vars()) {
             cmd.env(key, value);
+        }
+        // Task 7 裁決:CLAUDE_CONFIG_DIR 隔離 user 層 settings/MCP/plugins。
+        // 在 env_clear + 白名單之後顯式設定——受控變數,非繼承(不觸 token 排除紅線)
+        if let Some(cfg) = config_dir {
+            cmd.env("CLAUDE_CONFIG_DIR", cfg);
         }
         cmd.cwd(workdir);
         // 不用 --settings:CLI 自動載入 workdir 的 .claude/settings.json,並用會雙重註冊 hook
@@ -110,6 +139,9 @@ impl ClaudePtySession {
             _watcher: watcher,
             _master: master,
             child,
+            workdir: workdir.to_path_buf(),
+            respawn_argv,
+            config_dir: config_dir.map(Path::to_path_buf),
         })
     }
 
@@ -177,6 +209,25 @@ impl CliSession for ClaudePtySession {
             .and_then(|()| self.writer.flush())
             .map_err(|e| CliError(e.to_string()))
     }
+
+    fn respawn(&mut self) -> Result<(), CliError> {
+        // 先建新 session:成功才替換——失敗則保留舊 session,回 Err 供上層重試
+        let respawn_argv = self.respawn_argv.clone();
+        let workdir = self.workdir.clone();
+        let config_dir = self.config_dir.clone();
+        let argv: Vec<&str> = respawn_argv.iter().map(String::as_str).collect();
+        let fresh = Self::spawn_program(
+            &argv,
+            respawn_argv.clone(),
+            &workdir,
+            config_dir.as_deref(),
+            Box::new(std::io::sink()), // 無頭重啟:輸出導向 sink(Phase 5 GUI 改事件流)
+        )?;
+        // 舊 session 在此被 drop → Phase 3 teardown(kill + 有界等待 + SIGKILL)保證無殘留;
+        // 新 session 全新 = 乾淨(teardown 必經 = Global Constraints 3)
+        *self = fresh;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -227,7 +278,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudePtySession::spawn_program(
             &["sleep", "300"],
+            vec!["sleep".to_string(), "300".to_string()],
             dir.path(),
+            None,
             Box::new(std::io::sink()),
         )
         .unwrap();
@@ -235,6 +288,66 @@ mod tests {
         assert!(process_alive(pid));
         drop(session);
         assert!(!process_alive(pid), "teardown 後不得有殘留行程");
+    }
+
+    // Task 10:config_dir = Some 時,子行程環境必須有 CLAUDE_CONFIG_DIR
+    #[test]
+    fn config_dir_sets_env_for_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "printf '%s' \"$CLAUDE_CONFIG_DIR\" > cfg-probe.txt"],
+            vec!["sh".to_string()],
+            dir.path(),
+            Some(cfg.path()),
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let probe = dir.path().join("cfg-probe.txt");
+        let expected = cfg.path().to_string_lossy().to_string();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let got = loop {
+            if let Ok(content) = std::fs::read_to_string(&probe) {
+                if !content.is_empty() {
+                    break content;
+                }
+            }
+            if Instant::now() >= deadline {
+                break String::new();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        drop(session);
+        assert_eq!(got, expected);
+    }
+
+    // config_dir = None 時,子行程不得有 CLAUDE_CONFIG_DIR(env_clear + 白名單不含它)
+    #[test]
+    fn no_config_dir_leaves_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "printf 'val=[%s]' \"${CLAUDE_CONFIG_DIR:-UNSET}\" > cfg-probe.txt"],
+            vec!["sh".to_string()],
+            dir.path(),
+            None,
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let probe = dir.path().join("cfg-probe.txt");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let got = loop {
+            if let Ok(content) = std::fs::read_to_string(&probe) {
+                if !content.is_empty() {
+                    break content;
+                }
+            }
+            if Instant::now() >= deadline {
+                break String::new();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        drop(session);
+        assert_eq!(got, "val=[UNSET]");
     }
 
     // portable-pty 的 kill() 送 SIGHUP(0.9.0 實證)——攔截 HUP 的行程
@@ -245,7 +358,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudePtySession::spawn_program(
             &["sh", "-c", "trap '' HUP; while :; do sleep 1; done"],
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "trap '' HUP; while :; do sleep 1; done".to_string(),
+            ],
             dir.path(),
+            None,
             Box::new(std::io::sink()),
         )
         .unwrap();
@@ -253,5 +372,25 @@ mod tests {
         assert!(process_alive(pid));
         drop(session); // SIGHUP 被攔 → 有界等待 → SIGKILL
         assert!(!process_alive(pid), "SIGHUP 免疫的行程必須被 SIGKILL 收掉");
+    }
+
+    // teardown 必經(Global Constraints 3):respawn 必須收掉舊 child 並產生新的
+    #[test]
+    fn respawn_kills_old_child_and_starts_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = ClaudePtySession::spawn_program(
+            &["sleep", "300"],
+            vec!["sleep".to_string(), "300".to_string()],
+            dir.path(),
+            None,
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let old = session.child.process_id().expect("舊 child pid");
+        session.respawn().unwrap();
+        let new = session.child.process_id().expect("新 child pid");
+        assert_ne!(old, new, "respawn 必須產生新行程");
+        assert!(!process_alive(old), "舊 session 必須被 teardown 收掉(pgrep 無殘留)");
+        assert!(process_alive(new), "新 session 必須存活");
     }
 }
