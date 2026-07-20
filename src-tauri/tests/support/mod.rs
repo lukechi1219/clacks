@@ -68,6 +68,10 @@ pub struct ScriptedCli {
     pub respawns: u32,
     /// >0 時下 N 次 respawn 失敗(每次呼叫遞減);耗盡後恢復正常 respawn
     pub fail_respawns: u32,
+    /// wait_idle 呼叫次數(注入前 idle 編排測試斷言用)
+    pub idle_waits: u32,
+    /// >0 時下 N 次 wait_idle 回 Timeout(測 best-effort 續注入路徑);耗盡後正常
+    pub idle_timeouts: u32,
 }
 
 impl ScriptedCli {
@@ -80,6 +84,8 @@ impl ScriptedCli {
             fail_next_inject: false,
             respawns: 0,
             fail_respawns: 0,
+            idle_waits: 0,
+            idle_timeouts: 0,
         }
     }
 }
@@ -118,6 +124,15 @@ impl CliSession for ScriptedCli {
         // 替身的「全新 session」語意:清空已注入紀錄(消毒者無記憶 = 乾淨)
         self.messages.clear();
         self.controls.clear();
+        Ok(())
+    }
+
+    fn wait_idle(&mut self, _quiet_for: Duration, _timeout: Duration) -> Result<(), WaitError> {
+        self.idle_waits += 1;
+        if self.idle_timeouts > 0 {
+            self.idle_timeouts -= 1;
+            return Err(WaitError::Timeout);
+        }
         Ok(())
     }
 }

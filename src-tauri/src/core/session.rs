@@ -15,6 +15,19 @@ pub const CONTROL_BUFFER: Duration = Duration::from_secs(2);
 /// 設計文件預設:注入後 5 分鐘未見 hook 產物 → 該訊息判 failed
 pub const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// 注入前 idle 偵測的靜默視窗:PTY 輸出連續靜默達此長度 = TUI 回到可接受
+/// bracketed-paste 的就緒態(findings「Phase 5 設計輸入 A/C」:產物≠可輸入)。
+///
+/// 真機校正項(Task 12):此為保守起始值。太短 → 仍在收尾/thinking 停頓被
+/// 誤判就緒 → 掉字重演;太長 → 每則注入平白延遲。實際「收尾空窗」量級只能
+/// 真機量測(單發乾淨性 + 連發不吞字),回填此值並在報告揭露偏差。
+pub const IDLE_QUIET: Duration = Duration::from_millis(750);
+
+/// 等待就緒的上限:含開機/respawn 後 CLI 首次靜默(取代 spawn 後的死 sleep 15s)。
+/// 逾時 = 未能在期限內觀察到靜默(可能卡在 login/trust 對話框)——orchestrator
+/// 以 best-effort 續注入(GUI 版使用者可經 pane 人工介入),不視為 session 失敗
+pub const IDLE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// cyrano transcript(JSONL)大小門檻,超過即應在 Idle 時注入 /compact。
 /// 粗估值,待真實 transcript 量測校正;/compact 佈線屬 Phase 4
 /// (需 port 擴充提供估算輸入),本 phase 先落純決策
@@ -36,5 +49,11 @@ mod tests {
     #[test]
     fn at_threshold_compacts() {
         assert!(should_compact(COMPACT_THRESHOLD_BYTES));
+    }
+
+    #[test]
+    fn idle_quiet_is_shorter_than_settle_timeout() {
+        // 靜默視窗必須遠小於就緒上限,否則永遠等不到一個完整靜默窗
+        assert!(IDLE_QUIET < IDLE_SETTLE_TIMEOUT);
     }
 }
