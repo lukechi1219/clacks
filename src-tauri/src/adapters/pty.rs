@@ -52,6 +52,8 @@ pub struct ClaudePtySession {
     /// PTY 最後一次有輸出的時刻(reader thread 更新)。wait_idle 據此判就緒靜默。
     /// 單調時鐘 Instant——非 Clock port 的 SystemTime(idle 是牆鐘無關的量)
     last_output: Arc<Mutex<Instant>>,
+    /// 輸出工廠:respawn 時重建 writer,讓新 session 續串流(GUI pane 不靜止)
+    make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
 }
 
 impl ClaudePtySession {
@@ -61,9 +63,9 @@ impl ClaudePtySession {
     pub fn spawn(
         workdir: &Path,
         config_dir: Option<&Path>,
-        output: Box<dyn Write + Send>,
+        make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
     ) -> Result<Self, CliError> {
-        Self::spawn_program(&["claude"], vec!["claude".to_string()], workdir, config_dir, output)
+        Self::spawn_program(&["claude"], vec!["claude".to_string()], workdir, config_dir, make_output)
     }
 
     /// cyrano 專用:首次啟動全新對話,重啟以 `claude --continue` 續談。
@@ -71,14 +73,14 @@ impl ClaudePtySession {
     pub fn spawn_continue(
         workdir: &Path,
         config_dir: Option<&Path>,
-        output: Box<dyn Write + Send>,
+        make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
     ) -> Result<Self, CliError> {
         Self::spawn_program(
             &["claude"],
             vec!["claude".to_string(), "--continue".to_string()],
             workdir,
             config_dir,
-            output,
+            make_output,
         )
     }
 
@@ -88,7 +90,7 @@ impl ClaudePtySession {
         respawn_argv: Vec<String>,
         workdir: &Path,
         config_dir: Option<&Path>,
-        mut output: Box<dyn Write + Send>,
+        mut make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
     ) -> Result<Self, CliError> {
         let pty_system = native_pty_system();
         let portable_pty::PtyPair { slave, master } = pty_system
@@ -117,6 +119,7 @@ impl ClaudePtySession {
         let mut reader = master
             .try_clone_reader()
             .map_err(|e| CliError(e.to_string()))?;
+        let mut output = make_output(); // 本次 session 的 writer
         let last_output = Arc::new(Mutex::new(Instant::now()));
         let reader_clock = Arc::clone(&last_output);
         std::thread::spawn(move || {
@@ -150,6 +153,7 @@ impl ClaudePtySession {
             respawn_argv,
             config_dir: config_dir.map(Path::to_path_buf),
             last_output,
+            make_output,
         })
     }
 
@@ -219,22 +223,28 @@ impl CliSession for ClaudePtySession {
     }
 
     fn respawn(&mut self) -> Result<(), CliError> {
-        // 先建新 session:成功才替換——失敗則保留舊 session,回 Err 供上層重試
         let respawn_argv = self.respawn_argv.clone();
         let workdir = self.workdir.clone();
         let config_dir = self.config_dir.clone();
+        // 取出工廠交給新 session(fresh 會連工廠一起持有);建失敗則放回原狀
+        let noop: Box<dyn FnMut() -> Box<dyn Write + Send> + Send> =
+            Box::new(|| Box::new(std::io::sink()));
+        let taken = std::mem::replace(&mut self.make_output, noop);
         let argv: Vec<&str> = respawn_argv.iter().map(String::as_str).collect();
-        let fresh = Self::spawn_program(
-            &argv,
-            respawn_argv.clone(),
-            &workdir,
-            config_dir.as_deref(),
-            Box::new(std::io::sink()), // 無頭重啟:輸出導向 sink(Phase 5 GUI 改事件流)
-        )?;
-        // 舊 session 在此被 drop → Phase 3 teardown(kill + 有界等待 + SIGKILL)保證無殘留;
-        // 新 session 全新 = 乾淨(teardown 必經 = Global Constraints 3)
-        *self = fresh;
-        Ok(())
+        match Self::spawn_program(&argv, respawn_argv.clone(), &workdir, config_dir.as_deref(), taken) {
+            Ok(fresh) => {
+                // 舊 session drop → teardown;新 session 續用工廠串流(GUI pane 不靜止)
+                *self = fresh;
+                Ok(())
+            }
+            Err(e) => {
+                // 建失敗:工廠已 move 進 spawn_program 並在其失敗路徑 drop——
+                // 無法取回原工廠,但 self 仍是舊 session(仍在串流);後續 respawn
+                // 會以 noop 工廠重建(GUI 期若走到此,pane 靜止但 session 可用,
+                // 屬極端失敗降級,可接受)。回 Err 供 orchestrator 記錄重試
+                Err(e)
+            }
+        }
     }
 
     fn wait_idle(&mut self, quiet_for: Duration, timeout: Duration) -> Result<(), WaitError> {
@@ -323,7 +333,7 @@ mod tests {
             vec!["sleep".to_string(), "300".to_string()],
             dir.path(),
             None,
-            Box::new(std::io::sink()),
+            Box::new(|| Box::new(std::io::sink())),
         )
         .unwrap();
         let pid = session.child.process_id().expect("child 應有 pid");
@@ -342,7 +352,7 @@ mod tests {
             vec!["sh".to_string()],
             dir.path(),
             Some(cfg.path()),
-            Box::new(std::io::sink()),
+            Box::new(|| Box::new(std::io::sink())),
         )
         .unwrap();
         let probe = dir.path().join("cfg-probe.txt");
@@ -372,7 +382,7 @@ mod tests {
             vec!["sh".to_string()],
             dir.path(),
             None,
-            Box::new(std::io::sink()),
+            Box::new(|| Box::new(std::io::sink())),
         )
         .unwrap();
         let probe = dir.path().join("cfg-probe.txt");
@@ -407,7 +417,7 @@ mod tests {
             ],
             dir.path(),
             None,
-            Box::new(std::io::sink()),
+            Box::new(|| Box::new(std::io::sink())),
         )
         .unwrap();
         let pid = session.child.process_id().expect("child 應有 pid");
@@ -425,7 +435,7 @@ mod tests {
             vec!["sleep".to_string(), "300".to_string()],
             dir.path(),
             None,
-            Box::new(std::io::sink()),
+            Box::new(|| Box::new(std::io::sink())),
         )
         .unwrap();
         let old = session.child.process_id().expect("舊 child pid");
@@ -455,7 +465,7 @@ mod tests {
             vec!["sh".to_string()],
             dir.path(),
             None,
-            Box::new(sink),
+            Box::new(move || Box::new(sink.clone())),
         )
         .unwrap();
 
@@ -504,7 +514,7 @@ mod tests {
             vec!["sh".to_string()],
             dir.path(),
             None,
-            Box::new(sink),
+            Box::new(move || Box::new(sink.clone())),
         )
         .unwrap();
 

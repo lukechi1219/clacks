@@ -84,10 +84,10 @@ fn main() {
         }
     }
 
-    let mut taster = ClaudePtySession::spawn(&taster_dir, Some(&cli_config), Box::new(std::io::stdout()))
+    let mut taster = ClaudePtySession::spawn(&taster_dir, Some(&cli_config), Box::new(|| Box::new(std::io::stdout())))
         .expect("spawn taster");
     // cyrano 重啟以 --continue 續談(真機驗證項見 Task 9)
-    let mut cyrano = ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), Box::new(std::io::stdout()))
+    let mut cyrano = ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), Box::new(|| Box::new(std::io::stdout())))
         .expect("spawn cyrano");
 
     eprintln!("[clacks] 等待雙 CLI 開機 15s");
