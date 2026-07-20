@@ -259,6 +259,23 @@ impl CliSession for ClaudePtySession {
 mod tests {
     use super::*;
 
+    // wait_idle 計時測試專用:把 PTY 輸出鏡射進共享 buffer,讓測試能「觀察到
+    // 真實輸出已落地」再起算計時視窗,不必用猜測的 sleep margin 賭建構期
+    // (fork → watch_outbox FSEvents 註冊等)耗時——後者在高並行 cargo test
+    // 下實測可達數百 ms,足以吃穿任何固定 margin(見下方兩測試的教訓)
+    #[derive(Clone, Default)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     // 一級安全需求(骨架實證:portable-pty 預設繼承全父環境,token 直入子行程)
     #[test]
     fn minimal_env_excludes_secrets_and_unknowns() {
@@ -420,40 +437,87 @@ mod tests {
     }
 
     // 設計輸入 A/C 機制:輸出停止後 wait_idle 才返回 Ok;有輸出時不會提早就緒
+    //
+    // 時序修正(高並行 cargo test 下實測抓到的真測量縫):last_output 的時鐘從
+    // spawn_program 內部建構時刻起算(fork 之後、watch_outbox FSEvents 註冊之前)。
+    // 若測試用固定 sleep margin 猜建構期耗時,8-way 並行測試機器上實測建構期
+    // 可吃掉數百 ms(不穩定,任何固定 margin 遲早被吃穿)。改用可觀察的同步:
+    // 把輸出鏡射進 CapturingWriter,測試親眼看到 "boot" 真的落地才起算計時,
+    // 不猜建構期耗時
     #[test]
     fn wait_idle_returns_after_output_goes_quiet() {
         let dir = tempfile::tempdir().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let sink = CapturingWriter(Arc::clone(&captured));
         // 立刻噴一行、然後靜默(sleep 遠長於 quiet_for)
         let mut session = ClaudePtySession::spawn_program(
             &["sh", "-c", "printf 'boot\\n'; sleep 5"],
             vec!["sh".to_string()],
             dir.path(),
             None,
-            Box::new(std::io::sink()),
+            Box::new(sink),
         )
         .unwrap();
+
+        // 等到 "boot" 真的落地(last_output 已依此時刻更新),再起算計時窗——
+        // 不猜建構期耗時,直接觀察真實輸出。輪詢間隔壓到 2ms:輪詢本身在
+        // 「真實 last_output 落定」與「測試觀察到並設下 start」之間引入的滯後
+        // 上限即為此輪詢間隔,越小則下方 assert 的容許誤差(SYNC_SLOP)越小
+        let sync_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if captured.lock().unwrap().windows(4).any(|w| w == b"boot") {
+                break;
+            }
+            assert!(Instant::now() < sync_deadline, "boot 輸出逾時未落地");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
         let quiet_for = Duration::from_millis(300);
         let start = Instant::now();
         let r = session.wait_idle(quiet_for, Duration::from_secs(3));
         let waited = start.elapsed();
         drop(session);
         assert!(r.is_ok(), "靜默後必須就緒");
-        // 必然等到至少一個 quiet_for 窗(不會在還有輸出時就返回)
-        assert!(waited >= quiet_for, "不得在靜默窗達成前就返回:{waited:?}");
+        // 必然等到接近一個 quiet_for 窗(不會在還有輸出時就返回)。SYNC_SLOP
+        // 容忍上方輪詢同步引入的邊界滯後(輪詢間隔 2ms + mutex/排程抖動),
+        // 非放寬 wait_idle 本身的就緒判定邏輯
+        const SYNC_SLOP: Duration = Duration::from_millis(15);
+        assert!(
+            waited + SYNC_SLOP >= quiet_for,
+            "不得在靜默窗達成前就返回:{waited:?}"
+        );
     }
 
     // 期限內從不靜默(持續輸出)→ Timeout,呼叫端 best-effort
+    //
+    // 時序修正:同上一測試的建構期縫隙問題——先同步等到第一個位元組真的落地
+    // 再起算計時窗,避免子行程首個位元組尚未寫入前,建構時刻起算的靜默窗就
+    // 已誤觸發假 Ok。busy loop 不 fork 子行程(無 sleep),一旦開始輸出即近乎
+    // 連續,穩定達成「從不靜默」的測試意圖
     #[test]
     fn wait_idle_times_out_when_never_quiet() {
         let dir = tempfile::tempdir().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let sink = CapturingWriter(Arc::clone(&captured));
         let mut session = ClaudePtySession::spawn_program(
-            &["sh", "-c", "while :; do printf x; sleep 0.05; done"],
+            &["sh", "-c", "while :; do printf x; done"],
             vec!["sh".to_string()],
             dir.path(),
             None,
-            Box::new(std::io::sink()),
+            Box::new(sink),
         )
         .unwrap();
+
+        // 等到已觀察到真實輸出(busy loop 已開始跑),再起算計時窗
+        let sync_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            assert!(Instant::now() < sync_deadline, "首個輸出逾時未落地");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         let r = session.wait_idle(Duration::from_millis(500), Duration::from_millis(800));
         drop(session);
         assert_eq!(r, Err(WaitError::Timeout));
