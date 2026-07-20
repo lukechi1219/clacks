@@ -4,6 +4,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::outbox::watch_outbox;
@@ -48,6 +49,9 @@ pub struct ClaudePtySession {
     respawn_argv: Vec<String>,
     /// 隔離用 config 目錄(Task 7 裁決:CLAUDE_CONFIG_DIR)。None = 用預設 ~/.claude
     config_dir: Option<PathBuf>,
+    /// PTY 最後一次有輸出的時刻(reader thread 更新)。wait_idle 據此判就緒靜默。
+    /// 單調時鐘 Instant——非 Clock port 的 SystemTime(idle 是牆鐘無關的量)
+    last_output: Arc<Mutex<Instant>>,
 }
 
 impl ClaudePtySession {
@@ -113,12 +117,15 @@ impl ClaudePtySession {
         let mut reader = master
             .try_clone_reader()
             .map_err(|e| CliError(e.to_string()))?;
+        let last_output = Arc::new(Mutex::new(Instant::now()));
+        let reader_clock = Arc::clone(&last_output);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        *reader_clock.lock().unwrap() = Instant::now();
                         let _ = output.write_all(&buf[..n]);
                         let _ = output.flush();
                     }
@@ -142,6 +149,7 @@ impl ClaudePtySession {
             workdir: workdir.to_path_buf(),
             respawn_argv,
             config_dir: config_dir.map(Path::to_path_buf),
+            last_output,
         })
     }
 
@@ -227,6 +235,23 @@ impl CliSession for ClaudePtySession {
         // 新 session 全新 = 乾淨(teardown 必經 = Global Constraints 3)
         *self = fresh;
         Ok(())
+    }
+
+    fn wait_idle(&mut self, quiet_for: Duration, timeout: Duration) -> Result<(), WaitError> {
+        // 輪詢最後輸出時刻:距今 >= quiet_for 即視為就緒。輪詢間隔取 quiet_for 的
+        // 一小段(下限 20ms)以免忙等。deadline 內未達靜默 → Timeout(呼叫端 best-effort)
+        let deadline = Instant::now() + timeout;
+        let poll = (quiet_for / 8).max(Duration::from_millis(20));
+        loop {
+            let quiet_since = self.last_output.lock().unwrap().elapsed();
+            if quiet_since >= quiet_for {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(WaitError::Timeout);
+            }
+            std::thread::sleep(poll);
+        }
     }
 }
 
@@ -392,5 +417,45 @@ mod tests {
         assert_ne!(old, new, "respawn 必須產生新行程");
         assert!(!process_alive(old), "舊 session 必須被 teardown 收掉(pgrep 無殘留)");
         assert!(process_alive(new), "新 session 必須存活");
+    }
+
+    // 設計輸入 A/C 機制:輸出停止後 wait_idle 才返回 Ok;有輸出時不會提早就緒
+    #[test]
+    fn wait_idle_returns_after_output_goes_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        // 立刻噴一行、然後靜默(sleep 遠長於 quiet_for)
+        let mut session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "printf 'boot\\n'; sleep 5"],
+            vec!["sh".to_string()],
+            dir.path(),
+            None,
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let quiet_for = Duration::from_millis(300);
+        let start = Instant::now();
+        let r = session.wait_idle(quiet_for, Duration::from_secs(3));
+        let waited = start.elapsed();
+        drop(session);
+        assert!(r.is_ok(), "靜默後必須就緒");
+        // 必然等到至少一個 quiet_for 窗(不會在還有輸出時就返回)
+        assert!(waited >= quiet_for, "不得在靜默窗達成前就返回:{waited:?}");
+    }
+
+    // 期限內從不靜默(持續輸出)→ Timeout,呼叫端 best-effort
+    #[test]
+    fn wait_idle_times_out_when_never_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = ClaudePtySession::spawn_program(
+            &["sh", "-c", "while :; do printf x; sleep 0.05; done"],
+            vec!["sh".to_string()],
+            dir.path(),
+            None,
+            Box::new(std::io::sink()),
+        )
+        .unwrap();
+        let r = session.wait_idle(Duration::from_millis(500), Duration::from_millis(800));
+        drop(session);
+        assert_eq!(r, Err(WaitError::Timeout));
     }
 }
