@@ -1,0 +1,61 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 1rem;
+  background: #1e1e1e;
+  color: #ddd;
+}
+
+#controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+#panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 0.5rem;
+}
+
+.pane h2 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #aaa;
+}
+
+.term {
+  height: 320px;
+  background: #000;
+}
+
+.manual {
+  padding: 0.4rem;
+  background: #2a2a2a;
+  color: #ddd;
+  border: 1px solid #555;
+  border-radius: 4px;
+}
+
+#status {
+  margin-top: 1rem;
+}
+
+#status h2 {
+  font-size: 0.9rem;
+  color: #aaa;
+}

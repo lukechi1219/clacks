@@ -2,3 +2,5 @@ skeleton/target/
 src-tauri/target/
 src-tauri/gen/
 /.idea/
+node_modules/
+/dist/
