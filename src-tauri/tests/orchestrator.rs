@@ -482,6 +482,11 @@ fn idle_timeout_still_injects_best_effort() {
 
     assert_eq!(outcome, Some(MessageOutcome::Replied), "idle 逾時仍應 best-effort 完成");
     assert_eq!(taster.messages.len(), 1, "逾時後仍注入(訊息有送達 taster)");
+    // task reviewer 發現:原斷言不驗證 wait_idle 真的被呼叫過(idle_timeouts
+    // 消耗機制本身就需要至少一次呼叫,但斷言未釘死)——即使對舊 orchestrator
+    // (未編排 wait_idle)本測試也會通過,無法辨別本任務的編排是否存在。
+    // 補這行讓測試對編排缺失有辨別力,同時保留原意圖(逾時不致失敗)
+    assert!(taster.idle_waits >= 1, "本測試須真的呼叫過 wait_idle 才有辨別力");
 }
 
 #[test]
