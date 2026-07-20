@@ -1,7 +1,7 @@
 mod support;
 
 use clacks::ports::{CliSession, MessageStore, TelegramGateway, WaitError};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use support::*;
 
 #[test]
@@ -51,17 +51,6 @@ fn in_memory_store_dedups() {
     assert!(store.first_seen(7).unwrap());
     assert!(!store.first_seen(7).unwrap());
     assert!(store.first_seen(8).unwrap());
-}
-
-#[test]
-fn manual_clock_advances() {
-    use clacks::ports::Clock;
-    let clock = ManualClock::new(SystemTime::UNIX_EPOCH);
-    clock.advance(Duration::from_secs(5));
-    assert_eq!(
-        clock.now().duration_since(SystemTime::UNIX_EPOCH).unwrap(),
-        Duration::from_secs(5)
-    );
 }
 
 #[test]

@@ -3,14 +3,14 @@
 #![allow(dead_code)] // 各測試 crate 只用到部分替身
 
 use clacks::ports::{
-    Artifact, CliError, CliSession, Clock, GatewayError, IncomingMessage, MessageStore,
+    Artifact, CliError, CliSession, GatewayError, IncomingMessage, MessageStore,
     StoreError, TelegramGateway, Update, WaitError,
 };
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 // ---------- Telegram ----------
 
@@ -142,7 +142,7 @@ pub fn ok_artifact(raw: &str) -> Result<Artifact, WaitError> {
     Ok(Artifact { path: PathBuf::from("fake-artifact.json"), raw: raw.to_string() })
 }
 
-// ---------- Store / Clock ----------
+// ---------- Store ----------
 
 #[derive(Default)]
 pub struct InMemoryStore {
@@ -167,27 +167,6 @@ pub struct FailingStore;
 impl MessageStore for FailingStore {
     fn first_seen(&mut self, _update_id: i64) -> Result<bool, StoreError> {
         Err(StoreError("scripted store failure".to_string()))
-    }
-}
-
-pub struct ManualClock {
-    now: RefCell<SystemTime>,
-}
-
-impl ManualClock {
-    pub fn new(start: SystemTime) -> Self {
-        Self { now: RefCell::new(start) }
-    }
-
-    pub fn advance(&self, delta: Duration) {
-        let mut now = self.now.borrow_mut();
-        *now += delta;
-    }
-}
-
-impl Clock for ManualClock {
-    fn now(&self) -> SystemTime {
-        *self.now.borrow()
     }
 }
 

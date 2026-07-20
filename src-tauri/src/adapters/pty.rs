@@ -50,7 +50,7 @@ pub struct ClaudePtySession {
     /// 隔離用 config 目錄(Task 7 裁決:CLAUDE_CONFIG_DIR)。None = 用預設 ~/.claude
     config_dir: Option<PathBuf>,
     /// PTY 最後一次有輸出的時刻(reader thread 更新)。wait_idle 據此判就緒靜默。
-    /// 單調時鐘 Instant——非 Clock port 的 SystemTime(idle 是牆鐘無關的量)
+    /// 單調時鐘 Instant(idle 是牆鐘無關的量——只需相對時間,不需絕對時間)
     last_output: Arc<Mutex<Instant>>,
     /// 輸出工廠:respawn 時重建 writer,讓新 session 續串流(GUI pane 不靜止)
     make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,

@@ -3,7 +3,7 @@
 //! docs/superpowers/notes/2026-07-17-skeleton-findings.md
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 // ---------- Telegram ----------
 
@@ -101,7 +101,7 @@ pub trait CliSession {
     fn wait_idle(&mut self, quiet_for: Duration, timeout: Duration) -> Result<(), WaitError>;
 }
 
-// ---------- Store / Clock ----------
+// ---------- Store ----------
 
 #[derive(Debug)]
 pub struct StoreError(pub String);
@@ -111,9 +111,4 @@ pub struct StoreError(pub String);
 pub trait MessageStore {
     /// 第一次見到此 update_id → 記錄並回 true;已見過 → false
     fn first_seen(&mut self, update_id: i64) -> Result<bool, StoreError>;
-}
-
-/// 現在時刻。timeout / session 維護決策要可測,時間必須是注入的
-pub trait Clock {
-    fn now(&self) -> SystemTime;
 }
