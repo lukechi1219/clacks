@@ -2,7 +2,7 @@ mod support;
 
 use clacks::app::{Orchestrator, PipelineConfig};
 use clacks::core::contract::ContractViolation;
-use clacks::core::pipeline::MessageOutcome;
+use clacks::core::pipeline::{AwaitTarget, MessageOutcome};
 use clacks::core::session;
 use clacks::ports::{IncomingMessage, Update};
 use support::*;
@@ -507,4 +507,28 @@ fn empty_poll_keeps_offset() {
 
     assert_eq!(next_offset, 17);
     assert!(outcomes.is_empty());
+}
+
+/// GUI 人工介入通道(Task 9 設計裁決:forwarding 方法)。write_raw_to 是純轉發,
+/// 把 bytes 交給對的 session 的既有 write_raw——taster 輸入不得洩漏到 cyrano,反之亦然
+#[test]
+fn write_raw_to_forwards_to_correct_session() {
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![]);
+    let mut cyrano = ScriptedCli::new(vec![]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.write_raw_to(AwaitTarget::Taster, b"taster-input\r").unwrap();
+        orchestrator.write_raw_to(AwaitTarget::Cyrano, b"cyrano-input\r").unwrap();
+    }
+
+    // 各自只收到自己的 bytes,無交叉洩漏
+    assert_eq!(taster.raw_writes, vec![b"taster-input\r".to_vec()]);
+    assert_eq!(cyrano.raw_writes, vec![b"cyrano-input\r".to_vec()]);
 }
