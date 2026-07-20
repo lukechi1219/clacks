@@ -1,3 +1,10 @@
+//! **狀態(Phase 5 起):dev-only**。受支援部署路徑為 GUI(見 src/gui.rs)。
+//! 本 bin 無信號處理器且 PTY bytes 走 stdout(kitty 序列會污染控制終端、
+//! Ctrl-C 失效——findings「設計輸入 B」);停止請於另一終端
+//!   pkill -f 'target/debug/pipeline'   # 再以 pgrep -P <pid> 清孤兒 claude
+//! 乾淨的信號式關閉需改 run_forever 為可跳出迴圈(重寫 orchestrator),
+//! 本 phase 不做——GUI 以自己的 poll 迴圈 + stop 旗標達成乾淨 teardown
+//!
 //! Phase 4 composition root:真實雙 CLI 管線(taster + cyrano)。
 //! 唯一的組裝點(architecture.md 依賴規則 4):建 adapter、注入 orchestrator、run_forever。
 //! GUI/Tauri 留 Phase 5;本 bin 是無頭常駐版。
