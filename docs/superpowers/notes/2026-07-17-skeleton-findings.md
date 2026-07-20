@@ -175,3 +175,10 @@ headless pipeline 有兩個缺口:(1) cyrano TUI 經 PTY 把 kitty keyboard prot
 **約束落點:** 此裁決即 Global Constraints 2 與 6 的依據;其「一個任務具體執法」落在 **Task 9**(GUI 的 output 只進 emitter、stop 主動 drop session)與 **Task 12**(真機 pgrep 驗無孤兒)。本任務只定案 + 標註,不編碼。
 
 **headless `bin/pipeline.rs` 自 Phase 5 起為 dev-only,不加信號處理器;受支援部署路徑為 GUI。**
+
+## Phase 5 final review 承接項(2026-07-20,opus 全分支審查)
+
+- ⚠️(Important,**Task 12 真機必查**)**人工介入通道與 30s long-poll 共用同一 thread,worst-case 延遲達 ~30s**:`gui.rs` 的 pipeline thread 在每輪迴圈開頭排空 `input_rx`(轉呼叫 `write_raw_to`),隨後才呼叫 `orchestrator.poll_once`——後者內部 `getUpdates` 是 30s long-poll(`telegram.rs` timeout=30)。若使用者在 `poll_once` 正在等待中途才按 pane 的人工輸入送出(如 trust/login 對話框介入),要等當輪 long-poll 返回才會被轉發,worst-case ~30s。這直接牴觸本 phase 設計動機之一(pane + 輸入框消除 headless 的 pre-seed 死鎖需求)——若對話框本身在 30s 內逾時,人工回應可能來不及送達。**Task 12 真機 smoke 必須刻意驗證**:對一個存活中的 trust/login 對話框在 long-poll 進行中打字,量測實際延遲是否可接受;若不可接受,候選修法為縮短 `getUpdates` timeout 或把人工輸入排空移到獨立更短週期的通道(需再設計,不在本 phase 範圍)。
+- 觀察(非 blocking):`write_raw_to`(人工輸入)不經 `wait_idle` 就緒偵測(僅 orchestrator 自己的訊息注入路徑會 settle)——裁定為合理設計(人正盯著 pane 手動打字,不需要 idle 閘),但值得補一行程式碼註解讓不對稱性顯式化。
+- 觀察(非 blocking,已知,Task 9 ledger 已記):開機期(15s sleep)按 stop 會阻塞至 sleep 結束;`fatal` 自我退出後前端 start 按鈕未重新啟用(cosmetic)。
+- 流程觀察(非 blocking):本 phase 累積 4 個「brief 自身文字與其驗證指令自相矛盾」的 plan-clarity signal(Task 1/4/8 各一 + Task 2 的高並行計時假設)。final reviewer 獨立判斷:分布在「驗證指令精確度」而非設計/安全面,不構成系統性 plan 品質問題;建議未來 plan 若驗證指令本身是中間態(如 Task 1 的 RED 態),應在 plan 內明講而非讓執行者自行發現矛盾。
