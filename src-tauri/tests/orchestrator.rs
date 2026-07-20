@@ -441,6 +441,50 @@ fn poll_once_propagates_gateway_error() {
 }
 
 #[test]
+fn injects_only_after_waiting_for_idle() {
+    // 設計輸入 A/C:每則訊息注入前必先等 CLI 就緒(wait_idle),消除掉字空窗
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    let mut cyrano = ScriptedCli::new(vec![ok_artifact(r#"{"text":"回覆"}"#)]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let outcome = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.process_update(&text_update(1, 42, "hi"))
+    };
+
+    assert_eq!(outcome, Some(MessageOutcome::Replied));
+    assert!(taster.idle_waits >= 1, "taster 注入前必須先 wait_idle");
+    assert!(cyrano.idle_waits >= 1, "cyrano 注入前必須先 wait_idle");
+}
+
+#[test]
+fn idle_timeout_still_injects_best_effort() {
+    // wait_idle 逾時(卡就緒偵測)不得變成失敗:best-effort 續注入,仍走完管線
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    taster.idle_timeouts = 1; // taster 首次 wait_idle 回 Timeout
+    let mut cyrano = ScriptedCli::new(vec![ok_artifact(r#"{"text":"回覆"}"#)]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let outcome = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.process_update(&text_update(1, 42, "hi"))
+    };
+
+    assert_eq!(outcome, Some(MessageOutcome::Replied), "idle 逾時仍應 best-effort 完成");
+    assert_eq!(taster.messages.len(), 1, "逾時後仍注入(訊息有送達 taster)");
+}
+
+#[test]
 fn empty_poll_keeps_offset() {
     let gateway = FakeGateway::new(); // 無腳本 = 永遠空 poll
     let mut taster = ScriptedCli::new(vec![]);

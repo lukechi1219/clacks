@@ -173,6 +173,7 @@ impl<'a> Orchestrator<'a> {
     fn exec(&mut self, action: Action) -> Result<(), ExecError> {
         match action {
             Action::InjectTaster(text) => {
+                self.settle_before_inject(AwaitTarget::Taster);
                 self.taster.inject_message(&text).map_err(cli_failure)
             }
             Action::ClearTaster => {
@@ -183,6 +184,7 @@ impl<'a> Orchestrator<'a> {
                 Ok(())
             }
             Action::InjectCyrano(text) => {
+                self.settle_before_inject(AwaitTarget::Cyrano);
                 self.cyrano.inject_message(&text).map_err(cli_failure)
             }
             Action::SendReply { chat_id, text } => self
@@ -206,6 +208,22 @@ impl<'a> Orchestrator<'a> {
         }
         if let Err(error) = self.cyrano.respawn() {
             eprintln!("[clacks] cyrano 重啟失敗(下次 Lost 重試):{}", error.0);
+        }
+    }
+
+    /// 注入前就緒偵測(findings「設計輸入 A/C」):等 CLI 的 PTY 靜默達門檻。
+    /// 逾時(卡就緒/對話框)不視為失敗——best-effort 續注入(GUI 使用者可經
+    /// pane 人工介入)。此編排同時覆蓋 A(連發之間)與 C(recover 後的首次注入)
+    fn settle_before_inject(&mut self, target: AwaitTarget) {
+        let session: &mut dyn CliSession = match target {
+            AwaitTarget::Taster => &mut *self.taster,
+            AwaitTarget::Cyrano => &mut *self.cyrano,
+        };
+        if session
+            .wait_idle(session::IDLE_QUIET, session::IDLE_SETTLE_TIMEOUT)
+            .is_err()
+        {
+            eprintln!("[clacks] wait_idle 逾時,best-effort 續注入({target:?})");
         }
     }
 
