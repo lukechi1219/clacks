@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Clacks",
+  "version": "0.1.0",
+  "identifier": "dev.clacks.app",
+  "build": {
+    "frontendDist": "../src",
+    "devUrl": "http://localhost:5173"
+  },
+  "app": {
+    "windows": [
+      { "title": "Clacks", "width": 1200, "height": 800 }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false }
+}
