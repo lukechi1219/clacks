@@ -299,3 +299,27 @@ HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skil
 - ⚠️ hook 讀檔競態在 respawn 後第一輪同樣可能觸發(與設計輸入 A 連發時是同一根因,非新機制縫隙)
 
 **修法方向已在「設計輸入 A 連發測試」finding 中列出候選(hook 加等待/重讀迴圈),此處不重複;respawn 與連發是同一根因的兩個觸發路徑,修一次可望兩處都解**。
+
+## Phase 5 Task 12 真機 smoke 總結(2026-07-21)
+
+Checklist 全數完成:
+
+- ✅ 開窗 + 啟動:PASS(修過真機 bug #2 frontendDist、#3 缺 capabilities 後正常)
+- ✅ 人工介入通道:cli-config 已 pre-seed,未觸發對話框,條件不成立(跳過)
+- ✅ 乾淨訊息端到端:PASS
+- ✅ 惡意訊息:PASS(taster 正確攔下偽裝成一般文字的 shell 指令注入)
+- ⚠️ 設計輸入 A 連發:單發 3/3 PASS;連發 1/5 誤送(新發現的 Stop hook 讀檔競態,非 idle 偵測範疇,已列已知限制)
+- ⚠️ 設計輸入 C(respawn 後 settle):注入本身 PASS(舊 EIO 症狀消失);但撞到與連發測試同一個 hook 讀檔競態
+- ✅ 設計輸入 B(乾淨 teardown):PASS(停止後 pgrep 確認無殘留 taster/cyrano 行程)
+- ✅ token 不進 webview:PASS(全程畫面 + devtools 確認無 token 字串)
+
+**本次真機測試修復的真機 bug(3 個)**:
+1. `tauri.conf.json` frontendDist 誤指未建置的原始碼目錄(commit b1d6de9)
+2. 缺 `src-tauri/capabilities/` 導致 IPC 靜默被拒(commit 1a7191e)
+3. 兩個 wait_idle 測試在全 workspace 高並行下的計時假失敗(final review 階段修,commit bc3f1c2)
+
+**本次真機測試發現、未修的已知限制(2 項)**:
+1. 人工輸入通道與 30s Telegram long-poll 共用同一 thread,worst-case 延遲 ~28-30s(真機量測確認)
+2. Stop hook(`extract-reply.sh`)讀 transcript 早於 CLI 寫入完成的競態——依 session 有無先前內容,分岔成「空白」(taster 逐則 /clear、fail-closed 安全但訊息漏失)或「內容誤送」(cyrano --continue,答非所問的錯誤內容被實際送出,風險較高)。連發與 respawn 後首次注入皆可觸發,是同一根因。
+
+**Phase 5(Task 1-12)全數完成**。三個真機 bug 已修並 commit;兩項已知限制記錄在案、待後續 phase 決定是否修復。
