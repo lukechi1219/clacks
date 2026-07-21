@@ -101,9 +101,12 @@ HTTP client 逾時為 40 秒(`telegram.rs:59`),留有 10 秒緩衝空間。
 
 ### 修法 A(hook 腳本)
 
-- Hook script 目前**沒有**現成的自動化測試(骨架期的 shell script,測試策略對應表寫的是「Hook 腳本抽取回覆 / 腳本測試 / 假 transcript JSONL」)。延續此模式:新增一個腳本測試,餵入一個**分兩階段寫入**的假 transcript(先寫只到前一輪的內容,短暫延遲後再 append 當輪 entry,模擬磁碟寫入延遲),驗證 hook 最終抓到的是新內容而非重複舊內容。
+**更正(plan 階段查證發現,原設計文件此處判斷有誤)**:`tests/hook/test_extract_reply.sh` 已存在(Phase 2 建立),目前對 `templates/echo/.claude/hooks/extract-reply.sh` 跑兩個 fixture(`fixture-transcript.jsonl`、`fixture-thinking-race.jsonl`)。三份角色腳本(echo/taster/cyrano)內容逐位元組相同,故延續此既有測試檔案、擴充 `check` 函式使其可指定腳本路徑,而非新建測試基礎設施。
+
+- 擴充 `tests/hook/test_extract_reply.sh`:新增一個**分兩階段寫入**的 fixture(先寫只到前一輪的內容,短暫延遲後再 append 當輪 entry 含 `uuid`,模擬磁碟寫入延遲),驗證 hook 最終抓到的是新內容而非重複舊內容。
 - 需覆蓋:(1)首次執行、無 `.last-uuid` 檔案時正常抓取;(2)候選 uuid 與 `.last-uuid` 相同時會重試,直到抓到新 uuid 或逾時;(3)`.last-uuid` 在成功寫出後確實更新。
-- 因為兩份腳本內容相同,測試也應對兩份腳本各跑一次(或以其中一份的邏輯為準,plan 階段再決定是否值得抽成共用腳本——**不在本次設計範圍內主動做**,只有在 plan 階段發現重複帶來明顯維護成本時才考慮,避免超出兩項修法本身的範圍)。
+- 既有 fixture(`fixture-transcript.jsonl`、`fixture-thinking-race.jsonl`)**沒有** `uuid` 欄位,新查詢邏輯需對缺 `uuid` 的 entry 容錯(視為空字串,不影響既有兩個 fixture 的既有斷言繼續通過——不能讓本次修法破壞既有 regression test)。
+- 新增一個「三份角色腳本內容逐位元組相同」的斷言(`diff` 三份檔案),防止未來只改其中一份、造成靜默分歧。三份腳本邏輯相同,功能測試對其中一份(echo)跑一次即代表三者,不需要重複跑三次相同內容的測試。
 
 ### 修法 B(逾時常數)
 
