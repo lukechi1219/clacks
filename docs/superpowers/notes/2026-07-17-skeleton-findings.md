@@ -200,3 +200,28 @@ HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skil
 1. **`CLAUDE_CONFIG_DIR`**(隔 MCP/model/plugins/settings/OAuth)+ taster 的 `--append-system-prompt`(縱深防禦,強化角色指示抗污染)+ core 嚴格契約驗證(`parse_verdict` 的 `deny_unknown_fields`——契約外/被污染誘導的輸出兜底判 failed)三層合計是本專案可達到的隔離上限。
 2. **不再規劃 HOME 重定位相關的程式碼佈線**——`adapters::pty` 不需為此新增邏輯,此調查項到此收尾。
 3. 殘留風險(user 全域 CLAUDE.md/skills 滲入 taster context)維持已知、已記錄、靠縱深防禦緩解的狀態,不視為 blocking(taster 是消毒者非決策者,契約驗證是最終防線)。
+
+## Phase 5 Task 12 真機 smoke(2026-07-21,進行中)
+
+真 GUI(`bin/clacks-gui`)真機端到端。記已確認發現;checklist 逐項勾稽中。
+
+### 真機 bug #2(已修 commit b1d6de9):tauri.conf.json frontendDist 指向未建置原始碼
+
+- 現象:`cargo run --bin clacks-gui` 開出空白視窗,無任何按鈕。
+- 根因:Task 7 建 `tauri.conf.json` 時 Task 8 的前端與 `vite.config.ts` 尚未存在,`frontendDist` 沿用初版猜測值 `"../src"`(原始碼目錄,`index.html` 的 `<script type="module" src="./main.ts">` 指向未編譯的 TypeScript)。編譯期無法抓到(`cargo build` 只檢查 Rust 側,不驗證 frontendDist 內容可執行)——只有真的開視窗才會暴露。
+- 修:`frontendDist` 改指向 `npm run build` 的實際輸出目錄 `../dist`。
+- **暴露的縫**:debug build(`cargo run`,非 `cargo tauri dev`)下 Tauri 會優先用 `devUrl`(`http://localhost:5173`)而非 `frontendDist`——這是為了讓 dev 期熱重載生效的預期行為,但意味著**真機跑 GUI 必須額外開一個終端機跑 `npm run dev`**,否則連不上 devUrl(`Failed to load resource: Could not connect to the server`)。已記入操作前提。
+
+### 真機 bug #3(已修 commit 1a7191e):缺 capabilities 目錄,啟動管線按鈕無反應
+
+- 現象:畫面正常顯示後,按「啟動管線」完全無反應——無狀態變化、無錯誤對話框。
+- 根因(讀 `tauri-utils` 原始碼 `acl::get_capabilities` 確認):Task 7 建 Tauri scaffolding 時從未建立 `src-tauri/capabilities/` 目錄。Tauri v2 的 ACL 系統下,主視窗若無任何 capability 授權,IPC bridge 對所有 `invoke()` 一律**靜默**拒絕(不拋可見錯誤、不進 devtools console 明顯訊息)——前端 `start_pipeline` 按鈕的 `await invoke(...)` 因此卡住,後續的 UI 狀態切換都不會執行。此問題 Task 9/10 的 per-task review 都沒抓到,因為兩者都只驗證「編譯成功」與「靜態接線存在」,沒有真的觸發一次 runtime IPC 呼叫。
+- 修:加 `src-tauri/capabilities/default.json`,main 視窗授予 `core:default`(啟用 IPC bridge)。本專案自訂 command 非 plugin 命名空間,`core:default` 已足夠,不需逐一列權限。
+- **暴露的縫**:per-task review 的「編譯 + 靜態檢查」層級**無法**發現 Tauri v2 的 ACL/capabilities 缺漏——這類問題只有真的觸發一次 command 呼叫(真機互動,或未來若補 GUI 整合測試)才驗得出來。
+
+### 已通過
+- ✅ **開窗**:視窗正確顯示(1200×800、標題 Clacks、按鈕/狀態列/兩 pane/人工輸入框皆正確渲染)。
+- ✅ **啟動管線**:按下後狀態列變化(booting/running)、兩個 pane 出現 CLI 開機輸出——emitter → xterm.js 端到端確認通過。
+
+### 待補
+- 人工介入通道、乾淨訊息端到端、惡意訊息、設計輸入 A(連發/單發)、設計輸入 C(respawn 後 settle)、設計輸入 B(乾淨 teardown)、token 不進 webview 真機面——待續。
