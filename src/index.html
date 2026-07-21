@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Clacks</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="controls">
+      <button id="start">啟動管線</button>
+      <button id="stop" disabled>停止</button>
+      <span id="pipeline-state">未啟動</span>
+    </div>
+    <div id="panes">
+      <section class="pane">
+        <h2>taster(消毒者)</h2>
+        <div id="taster-term" class="term"></div>
+        <input class="manual" data-role="taster" placeholder="人工輸入(trust/login 對話框)…" />
+      </section>
+      <section class="pane">
+        <h2>cyrano(回應者)</h2>
+        <div id="cyrano-term" class="term"></div>
+        <input class="manual" data-role="cyrano" placeholder="人工輸入…" />
+      </section>
+    </div>
+    <div id="status">
+      <h2>訊息結果</h2>
+      <ul id="outcomes"></ul>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

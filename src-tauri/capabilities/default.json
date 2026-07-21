@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主視窗的基本權限——啟用 IPC bridge(core:default),app 自帶 command(start_pipeline/stop_pipeline/send_input)與 event(pty://taster、pty://cyrano、outcome、state、fatal、poll-error)不經 plugin 命名空間,core:default 已足夠",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

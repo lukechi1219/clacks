@@ -2,7 +2,7 @@ mod support;
 
 use clacks::app::{Orchestrator, PipelineConfig};
 use clacks::core::contract::ContractViolation;
-use clacks::core::pipeline::MessageOutcome;
+use clacks::core::pipeline::{AwaitTarget, MessageOutcome};
 use clacks::core::session;
 use clacks::ports::{IncomingMessage, Update};
 use support::*;
@@ -441,6 +441,55 @@ fn poll_once_propagates_gateway_error() {
 }
 
 #[test]
+fn injects_only_after_waiting_for_idle() {
+    // 設計輸入 A/C:每則訊息注入前必先等 CLI 就緒(wait_idle),消除掉字空窗
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    let mut cyrano = ScriptedCli::new(vec![ok_artifact(r#"{"text":"回覆"}"#)]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let outcome = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.process_update(&text_update(1, 42, "hi"))
+    };
+
+    assert_eq!(outcome, Some(MessageOutcome::Replied));
+    assert!(taster.idle_waits >= 1, "taster 注入前必須先 wait_idle");
+    assert!(cyrano.idle_waits >= 1, "cyrano 注入前必須先 wait_idle");
+}
+
+#[test]
+fn idle_timeout_still_injects_best_effort() {
+    // wait_idle 逾時(卡就緒偵測)不得變成失敗:best-effort 續注入,仍走完管線
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![ok_artifact(&taster_artifact(SAFE_VERDICT))]);
+    taster.idle_timeouts = 1; // taster 首次 wait_idle 回 Timeout
+    let mut cyrano = ScriptedCli::new(vec![ok_artifact(r#"{"text":"回覆"}"#)]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    let outcome = {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.process_update(&text_update(1, 42, "hi"))
+    };
+
+    assert_eq!(outcome, Some(MessageOutcome::Replied), "idle 逾時仍應 best-effort 完成");
+    assert_eq!(taster.messages.len(), 1, "逾時後仍注入(訊息有送達 taster)");
+    // task reviewer 發現:原斷言不驗證 wait_idle 真的被呼叫過(idle_timeouts
+    // 消耗機制本身就需要至少一次呼叫,但斷言未釘死)——即使對舊 orchestrator
+    // (未編排 wait_idle)本測試也會通過,無法辨別本任務的編排是否存在。
+    // 補這行讓測試對編排缺失有辨別力,同時保留原意圖(逾時不致失敗)
+    assert!(taster.idle_waits >= 1, "本測試須真的呼叫過 wait_idle 才有辨別力");
+}
+
+#[test]
 fn empty_poll_keeps_offset() {
     let gateway = FakeGateway::new(); // 無腳本 = 永遠空 poll
     let mut taster = ScriptedCli::new(vec![]);
@@ -458,4 +507,28 @@ fn empty_poll_keeps_offset() {
 
     assert_eq!(next_offset, 17);
     assert!(outcomes.is_empty());
+}
+
+/// GUI 人工介入通道(Task 9 設計裁決:forwarding 方法)。write_raw_to 是純轉發,
+/// 把 bytes 交給對的 session 的既有 write_raw——taster 輸入不得洩漏到 cyrano,反之亦然
+#[test]
+fn write_raw_to_forwards_to_correct_session() {
+    let gateway = FakeGateway::new();
+    let mut taster = ScriptedCli::new(vec![]);
+    let mut cyrano = ScriptedCli::new(vec![]);
+    let mut store = InMemoryStore::new();
+    let (_slept, sleeper) = recording_sleeper();
+
+    {
+        let mut orchestrator = Orchestrator::new(
+            &gateway, &mut taster, &mut cyrano, &mut store,
+            PipelineConfig::default(), sleeper,
+        );
+        orchestrator.write_raw_to(AwaitTarget::Taster, b"taster-input\r").unwrap();
+        orchestrator.write_raw_to(AwaitTarget::Cyrano, b"cyrano-input\r").unwrap();
+    }
+
+    // 各自只收到自己的 bytes,無交叉洩漏
+    assert_eq!(taster.raw_writes, vec![b"taster-input\r".to_vec()]);
+    assert_eq!(cyrano.raw_writes, vec![b"cyrano-input\r".to_vec()]);
 }

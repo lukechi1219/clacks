@@ -3,6 +3,14 @@ name = "clacks"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "clacks"
+# 既有 bins(pipeline/smoke)沿用 src/bin/;新增 GUI 入口 bin
+
+[[bin]]
+name = "clacks-gui"
+path = "src/bin/clacks-gui.rs"
+
 # 版本 pin 定承襲 skeleton/Cargo.toml 的實測值(骨架教訓:reqwest 0.12→0.13
 # feature 改名)。任何與此字面不符的調整必須在報告揭露
 [dependencies]
@@ -12,6 +20,10 @@ reqwest = { version = "0.13.4", default-features = false, features = ["blocking"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+tauri = "2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[build-dependencies]
+tauri-build = "2"

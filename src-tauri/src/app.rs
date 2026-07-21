@@ -170,9 +170,24 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
+    /// 人工介入通道轉發(GUI pane 的 trust/login 對話框輸入)。**純轉發,非決策
+    /// 邏輯**(Global Constraints 8):只把 bytes 交給既有 `CliSession::write_raw`,
+    /// 不碰狀態機/process_update。之所以必須經 orchestrator:orchestrator 持有
+    /// `&mut taster/cyrano` 的整個生命週期(單次建構於 poll 迴圈外以保住 taster_dirty
+    /// 的 fail-closed 狀態),poll 空檔 session 仍被借用,外部無法同時 write_raw——
+    /// 唯一乾淨路徑是經此轉呼叫(GUI 設計輸入,Task 9 裁決)
+    pub fn write_raw_to(&mut self, target: AwaitTarget, bytes: &[u8]) -> Result<(), CliError> {
+        let session: &mut dyn CliSession = match target {
+            AwaitTarget::Taster => &mut *self.taster,
+            AwaitTarget::Cyrano => &mut *self.cyrano,
+        };
+        session.write_raw(bytes)
+    }
+
     fn exec(&mut self, action: Action) -> Result<(), ExecError> {
         match action {
             Action::InjectTaster(text) => {
+                self.settle_before_inject(AwaitTarget::Taster);
                 self.taster.inject_message(&text).map_err(cli_failure)
             }
             Action::ClearTaster => {
@@ -183,6 +198,7 @@ impl<'a> Orchestrator<'a> {
                 Ok(())
             }
             Action::InjectCyrano(text) => {
+                self.settle_before_inject(AwaitTarget::Cyrano);
                 self.cyrano.inject_message(&text).map_err(cli_failure)
             }
             Action::SendReply { chat_id, text } => self
@@ -206,6 +222,22 @@ impl<'a> Orchestrator<'a> {
         }
         if let Err(error) = self.cyrano.respawn() {
             eprintln!("[clacks] cyrano 重啟失敗(下次 Lost 重試):{}", error.0);
+        }
+    }
+
+    /// 注入前就緒偵測(findings「設計輸入 A/C」):等 CLI 的 PTY 靜默達門檻。
+    /// 逾時(卡就緒/對話框)不視為失敗——best-effort 續注入(GUI 使用者可經
+    /// pane 人工介入)。此編排同時覆蓋 A(連發之間)與 C(recover 後的首次注入)
+    fn settle_before_inject(&mut self, target: AwaitTarget) {
+        let session: &mut dyn CliSession = match target {
+            AwaitTarget::Taster => &mut *self.taster,
+            AwaitTarget::Cyrano => &mut *self.cyrano,
+        };
+        if session
+            .wait_idle(session::IDLE_QUIET, session::IDLE_SETTLE_TIMEOUT)
+            .is_err()
+        {
+            eprintln!("[clacks] wait_idle 逾時,best-effort 續注入({target:?})");
         }
     }
 

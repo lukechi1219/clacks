@@ -3,14 +3,14 @@
 #![allow(dead_code)] // 各測試 crate 只用到部分替身
 
 use clacks::ports::{
-    Artifact, CliError, CliSession, Clock, GatewayError, IncomingMessage, MessageStore,
+    Artifact, CliError, CliSession, GatewayError, IncomingMessage, MessageStore,
     StoreError, TelegramGateway, Update, WaitError,
 };
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 // ---------- Telegram ----------
 
@@ -68,6 +68,10 @@ pub struct ScriptedCli {
     pub respawns: u32,
     /// >0 時下 N 次 respawn 失敗(每次呼叫遞減);耗盡後恢復正常 respawn
     pub fail_respawns: u32,
+    /// wait_idle 呼叫次數(注入前 idle 編排測試斷言用)
+    pub idle_waits: u32,
+    /// >0 時下 N 次 wait_idle 回 Timeout(測 best-effort 續注入路徑);耗盡後正常
+    pub idle_timeouts: u32,
 }
 
 impl ScriptedCli {
@@ -80,6 +84,8 @@ impl ScriptedCli {
             fail_next_inject: false,
             respawns: 0,
             fail_respawns: 0,
+            idle_waits: 0,
+            idle_timeouts: 0,
         }
     }
 }
@@ -120,6 +126,15 @@ impl CliSession for ScriptedCli {
         self.controls.clear();
         Ok(())
     }
+
+    fn wait_idle(&mut self, _quiet_for: Duration, _timeout: Duration) -> Result<(), WaitError> {
+        self.idle_waits += 1;
+        if self.idle_timeouts > 0 {
+            self.idle_timeouts -= 1;
+            return Err(WaitError::Timeout);
+        }
+        Ok(())
+    }
 }
 
 /// 便利建構:hook 產物(path 不參與語意,只有 raw 重要)
@@ -127,7 +142,7 @@ pub fn ok_artifact(raw: &str) -> Result<Artifact, WaitError> {
     Ok(Artifact { path: PathBuf::from("fake-artifact.json"), raw: raw.to_string() })
 }
 
-// ---------- Store / Clock ----------
+// ---------- Store ----------
 
 #[derive(Default)]
 pub struct InMemoryStore {
@@ -152,27 +167,6 @@ pub struct FailingStore;
 impl MessageStore for FailingStore {
     fn first_seen(&mut self, _update_id: i64) -> Result<bool, StoreError> {
         Err(StoreError("scripted store failure".to_string()))
-    }
-}
-
-pub struct ManualClock {
-    now: RefCell<SystemTime>,
-}
-
-impl ManualClock {
-    pub fn new(start: SystemTime) -> Self {
-        Self { now: RefCell::new(start) }
-    }
-
-    pub fn advance(&self, delta: Duration) {
-        let mut now = self.now.borrow_mut();
-        *now += delta;
-    }
-}
-
-impl Clock for ManualClock {
-    fn now(&self) -> SystemTime {
-        *self.now.borrow()
     }
 }
 

@@ -3,7 +3,7 @@
 //! docs/superpowers/notes/2026-07-17-skeleton-findings.md
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 // ---------- Telegram ----------
 
@@ -88,9 +88,20 @@ pub trait CliSession {
     ///
     /// 失敗(建新 session 失敗)時 self 維持原狀,回 Err 供 orchestrator 記錄並於下則訊息重試
     fn respawn(&mut self) -> Result<(), CliError>;
+
+    /// 阻塞至 PTY 輸出連續靜默達 `quiet_for`(= TUI 回到可接受 bracketed-paste),
+    /// 或達 `timeout`。注入訊息前呼叫,消除「產物已到但 TUI 未就緒」的注入空窗
+    /// (findings「Phase 5 設計輸入 A/C」:連發掉字、respawn 後 EIO)。
+    ///
+    /// - Ok(()):已觀察到就緒靜默,可安全注入
+    /// - Err(WaitError::Timeout):期限內未靜默(可能卡互動對話框)——呼叫端
+    ///   best-effort 續注入,不得視為 session 失敗(GUI 使用者可經 pane 介入)
+    ///
+    /// 控制指令(/clear)後的緩衝仍由 orchestrator 的 CONTROL_BUFFER 負責,兩者互補
+    fn wait_idle(&mut self, quiet_for: Duration, timeout: Duration) -> Result<(), WaitError>;
 }
 
-// ---------- Store / Clock ----------
+// ---------- Store ----------
 
 #[derive(Debug)]
 pub struct StoreError(pub String);
@@ -100,9 +111,4 @@ pub struct StoreError(pub String);
 pub trait MessageStore {
     /// 第一次見到此 update_id → 記錄並回 true;已見過 → false
     fn first_seen(&mut self, update_id: i64) -> Result<bool, StoreError>;
-}
-
-/// 現在時刻。timeout / session 維護決策要可測,時間必須是注入的
-pub trait Clock {
-    fn now(&self) -> SystemTime;
 }
