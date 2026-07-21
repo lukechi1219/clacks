@@ -246,3 +246,21 @@ HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skil
 2. **`IDLE_QUIET`(750ms)在單發情境下仍不足**:即使沒有人工輸入干擾,idle 偵測的門檻值本身可能還不夠保守,與 Phase 4 findings 記錄的「單發訊息也會掉字」現象一致。
 
 **待辦(Task 12 後續測試)**:進行設計輸入 A 的連發/單發測試時,**應避免同時操作 pane 的人工輸入框**,以隔離變因、確認究竟是假說 1 還是假說 2(或兩者皆有)。若後續乾淨測試(全程不碰人工輸入)仍出現 EmptyReply,則假說 2 成立,需調大 `IDLE_QUIET`;若乾淨測試不再出現,則假說 1 成立,需要幫 send_input 加互斥鎖(未來獨立任務)。
+
+### 真機發現(2026-07-21):設計輸入 A 連發測試——新競態,Stop hook 讀 transcript 早於 CLI 寫入完成
+
+連發 5 則(A1~A5,~1 秒間隔內)測試,taster 全數正確判定(5/5,無空白/無重複,見 taster/outbox 逐一核對)。**cyrano 側 A4 的回覆內容錯誤**:Telegram 收到的是 A3 回覆的重複內容,而非 A4 的回覆。
+
+**根因追查(讀 outbox 產物 + cyrano session transcript 直接對照,非猜測)**:
+- `cyrano/outbox` 的 A4 對應檔案(`1784605057-30091-reply.json`)內容為 `{"text": "A3 收到 😂 你是在測試我還是在數數？有事直接講啦"}`——與 A3 的 outbox 檔案**逐字重複**。
+- cyrano 的 session transcript(`9d0f503a-...jsonl`)裡卻明確記錄 A4 這一輪 CLI **確實正確生成了對題的回覆**:`"A4 就是紙的尺寸吧 😆 好啦，你要講什麼？"`(uuid=3b80d58f,timestamp 03:37:37.640Z)——與送到 Telegram 的內容完全不同。
+- **結論**:CLI 生成正確,問題在 `templates/cyrano/.claude/hooks/extract-reply.sh` 的 Stop hook 讀取 transcript 的時機。該 hook 已修過一次「thinking 尚未 flush、最後一個 assistant entry 只有 thinking 無 text」的競態(骨架階段記錄,選取「最後一個含 text 區塊的 entry」而非單純 last)。但這次是**新的一種競態**:Stop 事件觸發 hook 執行、hook 讀檔的那個瞬間,CLI 可能**尚未把當輪(A4)的 assistant entry 寫進磁碟上的 transcript 檔**——hook 讀到的仍是只到 A3 為止的內容,選取邏輯正確地抓出「最後一個含 text 的 entry」,但那個 entry 是 A3 的(因為 A4 的還沒落地),於是重複送出 A3。
+
+**與本 phase 機制的關係**:此競態發生在 **hook script 讀檔 vs CLI 寫檔**的時間點,跟 Rust 端的 `wait_idle`(PTY 輸出靜默偵測,管**注入前**的就緒狀態)完全獨立、機制修不到——即使 idle 偵測完美運作、注入時機完全正確,只要 CLI 生成完成(觸發 Stop)到 transcript 實際落地磁碟之間有任何延遲,就可能重演此問題。
+
+**候選修法(未實作,留待後續)**:
+1. hook script 加入等待/重試迴圈:讀到的「最後含 text 條目」若與**上一次已送出的內容相同**,短暫 sleep 後重讀,直到內容變化或逾時(需要 hook 記住上次送出的內容,增加狀態)。
+2. hook script 改用檔案 mtime 或事件觸發時的 timestamp 比對:若 transcript 最後一筆 entry 的 timestamp 早於 Stop 事件觸發時刻太多,視為「可能未寫完」,重讀。
+3. 提高複雜度前,先確認**發生機率與影響面**:本次 5 則連發只中 1 則(A4),且是安全機制擋不到的「內容誤送」(不是 EmptyReply 被 fail-closed 擋下,是**錯誤但看似合法的內容被送出**)——比 EmptyReply 更需要重視,因為對使用者而言是「收到答非所問的回覆」而非「訊息石沉大海」。
+
+**裁決(2026-07-21,使用者確認)**:先記錄、暫不修,列為已知限制。
