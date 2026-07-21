@@ -276,3 +276,26 @@ HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skil
 **設計輸入 A checklist 結論**:
 - ✅ 單發乾淨性(idle 偵測有效,3/3 全過)
 - ⚠️ 連發(~1 秒間隔)仍有 1/5 誤送(Stop hook 讀檔競態,非 idle 偵測範疇,已列已知限制待後續修)
+
+### 真機發現(2026-07-21):設計輸入 C(respawn 後 settle)——EIO 舊症狀已消,但撞到同一個 hook 讀檔競態(統一根因)
+
+手動 kill cyrano → 下則訊息 `SessionLost`(11:56:18,taster 側已正確判定但 cyrano 注入失敗,符合預期)→ `recover()` 觸發 taster+cyrano 一起重啟(pane 顯示新 session 開機,符合預期)。
+
+**好消息**:Phase 4 當時記錄的「recover 後緊接撞 `os error 5`(EIO)」症狀**這次沒有重演**——本 phase 的 `wait_idle` 覆蓋 respawn 後首次注入(設計輸入 C 的原始目標)看起來確實生效,注入本身沒有失敗。
+
+**但緊接著撞到另一個症狀**:recover 後第一則訊息(11:56:46)結果為 `ContractViolation(EmptyReply)`,第二則(11:57:07,使用者手動重發)才 `Replied`。追查發現這**不是新問題,而是今天稍早在「設計輸入 A 連發測試」發現的同一個 Stop hook 讀檔競態**,只是這次的觸發點是 respawn 而非連發:
+
+- taster 側:讀該次 session transcript(`12775b72-...jsonl`),確認 CLI **其實正確生成了合法判定**(`{"safe":true,"sanitized_text":"新訊息",...}`,timestamp 03:56:46.858Z),但 outbox 產物是空字串——hook 讀檔時機早於這筆內容落地磁碟。因為 taster 是全新 session(逐則 `/clear`,無先前內容可回退),「最後一個含 text 的 entry」找不到任何東西,吐出空字串 → `EmptyReply`。
+- cyrano 側:同一輪(11:57:07)送到 Telegram 的內容經核對,是**七分鐘前、respawn 之前的舊回覆**(單發測試 B3 的內容:「再下去我要準備賓果卡了…B3——這局你要不要說明一下規則?」)。因為 cyrano 走 `--continue`(續接舊對話,含 respawn 前的歷史),hook 讀檔時機若早於新一輪內容落地,「最後一個含 text 的 entry」會回退到**舊 session 殘留的最後內容**,而非空字串。
+
+**統一根因(今天兩次真機發現合併)**:`extract-reply.sh` 的「抓最後一個含 text 區塊的 assistant entry」邏輯,在 Stop 事件觸發、hook 開始讀檔的那個瞬間,若 CLI 尚未把本輪內容寫入磁碟上的 transcript 檔,會依 session 是否有「先前內容」分岔成兩種錯誤:
+1. **無先前內容**(全新 session,如 taster 逐則 `/clear`、或 respawn 後首次)→ 吐空字串 → `EmptyReply`(安全,fail-closed 擋下,但訊息石沉大海)。
+2. **有先前內容**(續接 session,如 cyrano `--continue`)→ 回退抓到舊內容 → **內容誤送**(不安全,答非所問的錯誤內容被實際送出,是本次真機測試中風險較高的一種)。
+
+此競態與 Rust 端的 `wait_idle`(管注入前的 PTY 靜默偵測)完全獨立、機制修不到——即使注入時機完美,只要「CLI 生成完成觸發 Stop」到「transcript 實際落地磁碟」之間有任何延遲空窗,就可能重演。**respawn 是新增的一個觸發點**(recover 後第一輪 Stop 觸發時機可能特別容易撞上這個空窗,原因待查——或許是新 session 剛啟動時磁碟/程序調度的額外延遲)。
+
+**設計輸入 C checklist 結論**:
+- ✅ 注入本身穩定(EIO 舊症狀消失,`wait_idle` 覆蓋 respawn 後首次注入生效)
+- ⚠️ hook 讀檔競態在 respawn 後第一輪同樣可能觸發(與設計輸入 A 連發時是同一根因,非新機制縫隙)
+
+**修法方向已在「設計輸入 A 連發測試」finding 中列出候選(hook 加等待/重讀迴圈),此處不重複;respawn 與連發是同一根因的兩個觸發路徑,修一次可望兩處都解**。
