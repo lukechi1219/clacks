@@ -225,3 +225,11 @@ HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skil
 
 ### 待補
 - 人工介入通道、乾淨訊息端到端、惡意訊息、設計輸入 A(連發/單發)、設計輸入 C(respawn 後 settle)、設計輸入 B(乾淨 teardown)、token 不進 webview 真機面——待續。
+
+### 真機確認(2026-07-21):人工輸入通道 30s long-poll 延遲——final review 預測命中
+
+- final review(2026-07-20)當時預測:人工輸入通道與 Telegram 30s long-poll 共用同一 pipeline thread,worst-case 延遲達 ~30s。
+- **真機實測驗證**:cyrano CLI 顯示閒置(prompt 空著,無處理中指示),使用者在 pane 人工輸入框打字送出後,**約 28 秒**才在 pane 看到反應。與 `getUpdates` 的 `timeout=30` 長輪詢完全吻合——確認人工輸入被卡在 `input_rx` 佇列裡,直到當輪 `poll_once` 的 long-poll 返回、迴圈跳回最上面才被排空、真正寫進 PTY。
+- **意義**:trust/login 對話框若自身在 30 秒內逾時(常見情況),使用者透過 pane 的介入可能來不及送達——直接牴觸本 phase 設計動機之一(pane+輸入框取代 headless 的 pre-seed 死鎖)。
+- **裁決(待使用者決定是否本次一併修復)**:候選修法(1)縮短 `getUpdates` timeout(`telegram.rs:81` 的 `"timeout"` query 參數,目前 30);(2)人工輸入排空移到獨立、更短週期的通道(需要把 `taster`/`cyrano` session 改成跨執行緒共享,牽動目前「orchestrator 獨佔 &mut session 整個生命週期以保 taster_dirty」的設計,屬較大改動,不建議在 Task 12 收尾階段做)。
+- **裁決(2026-07-21,使用者確認)**:本次不修,列為已知可用性限制,續走 Task 12 其餘清單項目;是否縮短 timeout 留待之後決定。
