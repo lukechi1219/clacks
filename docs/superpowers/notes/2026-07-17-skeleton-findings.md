@@ -182,3 +182,21 @@ headless pipeline 有兩個缺口:(1) cyrano TUI 經 PTY 把 kitty keyboard prot
 - 觀察(非 blocking):`write_raw_to`(人工輸入)不經 `wait_idle` 就緒偵測(僅 orchestrator 自己的訊息注入路徑會 settle)——裁定為合理設計(人正盯著 pane 手動打字,不需要 idle 閘),但值得補一行程式碼註解讓不對稱性顯式化。
 - 觀察(非 blocking,已知,Task 9 ledger 已記):開機期(15s sleep)按 stop 會阻塞至 sleep 結束;`fatal` 自我退出後前端 start 按鈕未重新啟用(cosmetic)。
 - 流程觀察(非 blocking):本 phase 累積 4 個「brief 自身文字與其驗證指令自相矛盾」的 plan-clarity signal(Task 1/4/8 各一 + Task 2 的高並行計時假設)。final reviewer 獨立判斷:分布在「驗證指令精確度」而非設計/安全面,不構成系統性 plan 品質問題;建議未來 plan 若驗證指令本身是中間態(如 Task 1 的 RED 態),應在 plan 內明講而非讓執行者自行發現矛盾。
+
+## Phase 5 HOME 重定位完全隔離驗證(2026-07-21,Task 11,真機實測)
+
+以 `HOME=../clacks-runtime/taster-home`(空目錄)+ 既有 `CLAUDE_CONFIG_DIR=../clacks-runtime/cli-config` 啟動 probe workdir 的 claude,對照 findings「Phase 4 ~/.claude 隔離調查」未驗證的 HOME × OAuth 交互假設。
+
+### 實測結果
+
+- ✅ **OAuth 不受影響**:登入態不需重新來過,如預期落在 `CLAUDE_CONFIG_DIR/.claude.json`(Phase 4 已證實),與 HOME 無關。
+- ❌ **user 全域 CLAUDE.md 洩漏未消除**:仍跳出「Allow external CLAUDE.md file imports?」對話框——HOME 重定位到空目錄**沒有**擋掉這個對話框的觸發。
+- ❌ **決定性反證**:CLI 自動載入了指向**真實使用者家目錄**的 skill 設定(如 `Path: /Users/lukechimbp2023/.claude/skills/yellow-duck-n-review`),而非 `HOME` 重定位後的空目錄。證明 CLI 對「使用者家目錄」的解析**至少部分不經過 `$HOME` 環境變數**(可能透過 OS API 如 `getpwuid` 直接查真實帳號家目錄,或有獨立於 `$HOME` 的設定路徑),`HOME=` override 對這條路徑無效。
+
+### 裁決:**不可行(fallback)**
+
+HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skills)有一條不經 `$HOME` 環境變數的解析路徑,直接查真實帳號家目錄,`HOME` override 只能影響部分行為(不影響 OAuth,但也不擋 CLAUDE.md 洩漏與 skills 載入)。維持 Phase 4 的部分隔離方案為終局:
+
+1. **`CLAUDE_CONFIG_DIR`**(隔 MCP/model/plugins/settings/OAuth)+ taster 的 `--append-system-prompt`(縱深防禦,強化角色指示抗污染)+ core 嚴格契約驗證(`parse_verdict` 的 `deny_unknown_fields`——契約外/被污染誘導的輸出兜底判 failed)三層合計是本專案可達到的隔離上限。
+2. **不再規劃 HOME 重定位相關的程式碼佈線**——`adapters::pty` 不需為此新增邏輯,此調查項到此收尾。
+3. 殘留風險(user 全域 CLAUDE.md/skills 滲入 taster context)維持已知、已記錄、靠縱深防禦緩解的狀態,不視為 blocking(taster 是消毒者非決策者,契約驗證是最終防線)。
