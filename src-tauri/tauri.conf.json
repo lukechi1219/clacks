@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.clacks.app",
   "build": {
-    "frontendDist": "../src",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
   },
   "app": {
