@@ -233,3 +233,16 @@ HOME 重定位**無法**達成完全隔離——user 全域設定(至少含 skil
 - **意義**:trust/login 對話框若自身在 30 秒內逾時(常見情況),使用者透過 pane 的介入可能來不及送達——直接牴觸本 phase 設計動機之一(pane+輸入框取代 headless 的 pre-seed 死鎖)。
 - **裁決(待使用者決定是否本次一併修復)**:候選修法(1)縮短 `getUpdates` timeout(`telegram.rs:81` 的 `"timeout"` query 參數,目前 30);(2)人工輸入排空移到獨立、更短週期的通道(需要把 `taster`/`cyrano` session 改成跨執行緒共享,牽動目前「orchestrator 獨佔 &mut session 整個生命週期以保 taster_dirty」的設計,屬較大改動,不建議在 Task 12 收尾階段做)。
 - **裁決(2026-07-21,使用者確認)**:本次不修,列為已知可用性限制,續走 Task 12 其餘清單項目;是否縮短 timeout 留待之後決定。
+
+### 真機發現(2026-07-21):11:01:11 EmptyReply 根因追查——問題在 cyrano 不在 taster
+
+以 outbox 產物直接對時間軸(非猜測):
+- `taster/outbox` 11:01:08 產出 `{"safe":true,"sanitized_text":"第一則",...}`——taster 判定正常,非問題來源。
+- `cyrano/outbox` 11:01:11(3 秒後)產出 `{"text": ""}`——**cyrano 這一輪注入被吞、輸出空白**,core 正確判 `ContractViolation(EmptyReply)` 並擋下(安全不變量守住,未送到 Telegram)。
+- 使用者疑似重發同一則後,taster 11:01:50 再次判定正常,cyrano 11:01:54 這次正常回覆「你好,我在。有什麼想聊的嗎?」,變成 `Replied`。
+
+**根因未能確定(兩個假說,待後續測試釐清)**:
+1. **人工輸入與正常注入無互斥**:`send_input`(人工輸入通道)與 orchestrator 正常的 `InjectCyrano` 寫入**同一個 PTY writer,完全沒有互斥機制**。若使用者當下同時在 cyrano pane 手動打字,兩邊寫入可能交錯,導致 orchestrator 的正常注入被干擾/吞掉。使用者無法確認當下是否有動 cyrano pane。
+2. **`IDLE_QUIET`(750ms)在單發情境下仍不足**:即使沒有人工輸入干擾,idle 偵測的門檻值本身可能還不夠保守,與 Phase 4 findings 記錄的「單發訊息也會掉字」現象一致。
+
+**待辦(Task 12 後續測試)**:進行設計輸入 A 的連發/單發測試時,**應避免同時操作 pane 的人工輸入框**,以隔離變因、確認究竟是假說 1 還是假說 2(或兩者皆有)。若後續乾淨測試(全程不碰人工輸入)仍出現 EmptyReply,則假說 2 成立,需調大 `IDLE_QUIET`;若乾淨測試不再出現,則假說 1 成立,需要幫 send_input 加互斥鎖(未來獨立任務)。
