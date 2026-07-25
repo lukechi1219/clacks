@@ -458,11 +458,13 @@ spawn() 改用 taster_argv() 同時產生 argv 與 respawn_argv——單一來�
 npm run dev
 ```
 
-終端 B:
+終端 B(**token 必須從 Keychain 注入**——`telegram.rs` 讀不到 `CLACKS_BOT_TOKEN` 會直接 panic;token 只經環境變數進 Rust,絕不落檔):
 
 ```bash
-cargo run --manifest-path src-tauri/Cargo.toml --bin clacks-gui
+CLACKS_BOT_TOKEN=$(security find-generic-password -s clacks-bot -w) cargo run --manifest-path src-tauri/Cargo.toml --bin clacks-gui
 ```
+
+漏掉前綴會得到 `panicked at src/adapters/telegram.rs: CLACKS_BOT_TOKEN not set: NotPresent`——那是缺 token,不是 sandbox 的問題,別誤判成接線失敗。
 
 Expected: GUI 視窗出現雙 pane,taster pane 出現 claude TUI 畫面。
 
@@ -506,7 +508,7 @@ Expected: 管線不崩、taster 產出合法 JSON 契約產物、回覆內容沒
 暫時把 `templates/sandbox/clacks.sb` 的 `(subpath (param "CONFIG_DIR"))` 改成 `(subpath (param "BOGUS_PARAM"))`,然後:
 
 ```bash
-cargo run --manifest-path src-tauri/Cargo.toml --bin clacks-gui
+CLACKS_BOT_TOKEN=$(security find-generic-password -s clacks-bot -w) cargo run --manifest-path src-tauri/Cargo.toml --bin clacks-gui
 ```
 
 Expected: taster pane 出現 `sandbox-exec: invalid data type of path filter; expected pattern, got boolean`(或同類錯誤),taster **完全起不來**。
