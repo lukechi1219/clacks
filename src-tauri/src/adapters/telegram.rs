@@ -73,12 +73,19 @@ impl TelegramHttp {
     }
 }
 
+// Phase 6:人工輸入通道與此長輪詢共用同一 pipeline thread(gui.rs),
+// worst-case 延遲即此逾時值;真機量測確認縮短後延遲隨之下降(findings)。
+const GETUPDATES_LONGPOLL_SECS: &str = "5";
+
 impl TelegramGateway for TelegramHttp {
     fn poll_updates(&self, offset: i64) -> Result<Vec<Update>, GatewayError> {
         let resp: UpdatesResponse = self
             .http
             .get(self.url("getUpdates"))
-            .query(&[("offset", offset.to_string()), ("timeout", "30".to_string())])
+            .query(&[
+                ("offset", offset.to_string()),
+                ("timeout", GETUPDATES_LONGPOLL_SECS.to_string()),
+            ])
             .send()
             .map_err(Self::redact)?
             .error_for_status()
@@ -261,5 +268,53 @@ mod tests {
             let shown = format!("{err:?}");
             assert!(!shown.contains("SECRET123TOKEN"), "token leaked: {shown}");
         }
+    }
+
+    // Phase 6:人工輸入通道與 30s long-poll 共用同一 thread,worst-case 延遲
+    // 真機量測 ~28-30s(findings 2026-07-20/21)。縮短逾時值直接壓低這個上限。
+    #[test]
+    fn poll_updates_uses_shortened_longpoll_timeout() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("read local addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                let n = stream.read(&mut chunk).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&chunk[..n]);
+                if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = b"{\"ok\":true,\"result\":[]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write headers");
+            stream.write_all(body).expect("write body");
+            stream.flush().expect("flush");
+            received
+        });
+
+        let client = TelegramHttp::new("SECRET123TOKEN".to_string(), format!("http://{addr}"));
+        client.poll_updates(0).expect("poll_updates should succeed against stub");
+
+        let received = server.join().expect("stub server thread panicked");
+        let request_line = String::from_utf8_lossy(&received);
+        let first_line = request_line.lines().next().unwrap_or_default();
+
+        assert!(
+            first_line.contains("timeout=5") && !first_line.contains("timeout=30"),
+            "expected shortened long-poll timeout in request line, got: {first_line}"
+        );
     }
 }
