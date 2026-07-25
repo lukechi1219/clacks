@@ -434,15 +434,23 @@ mod tests {
         // (deref coercion 不穿透 Option),寫 Some(&cfg) 會編不過
         let mut argv = taster_argv(&work, Some(cfg.as_path()));
         assert_eq!(argv.pop().as_deref(), Some("claude"), "最後一個元素應為 claude");
-        // 白名單外寫入成功與否寫進 verdict.txt(它本身落在 WORKDIR 內)——
-        // 檔案存在即證明 WORKDIR 可寫,內容則證明白名單外被拒
+        // 白名單外寫入、以及 CONFIG_DIR 內寫入,成功與否都寫進 verdict.txt
+        // (它本身落在 WORKDIR 內)——檔案存在即證明 WORKDIR 可寫,內容則同時
+        // 證明白名單外被拒、且 CONFIG_DIR 這個白名單項目真的可寫(不只是
+        // profile 語法上引用了它,而是 sandbox-exec 真的放行)。CLI 的
+        // OAuth/設定寫入依賴的正是 CONFIG_DIR 可寫這個屬性——若白名單項目
+        // 語法正確但比對邏輯有誤(例如比錯路徑),先前的探針只驗 WORKDIR
+        // 可寫、outside 被拒,不會抓到這種 CONFIG_DIR 白名單失效的情形
         argv.push("sh".to_string());
         argv.push("-c".to_string());
         argv.push(format!(
             "if echo x > '{outside}/probe.txt' 2>/dev/null; \
-             then v=ALLOWED; else v=DENIED; fi; \
-             printf 'outside=%s' \"$v\" > '{work}/verdict.txt'",
+             then o=ALLOWED; else o=DENIED; fi; \
+             if echo x > '{cfg}/probe.txt' 2>/dev/null; \
+             then c=ALLOWED; else c=DENIED; fi; \
+             printf 'outside=%s cfg=%s' \"$o\" \"$c\" > '{work}/verdict.txt'",
             outside = outside.display(),
+            cfg = cfg.display(),
             work = work.display(),
         ));
 
@@ -455,6 +463,7 @@ mod tests {
             Box::new(|| Box::new(std::io::sink())),
         )
         .expect("sandbox-exec 包裝下應可 spawn");
+        let pid = session.child.process_id().expect("child 應有 pid");
 
         let verdict_path = work.join("verdict.txt");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -472,10 +481,15 @@ mod tests {
         drop(session);
 
         assert_eq!(
-            verdict, "outside=DENIED",
-            "verdict.txt 必須存在(證明 WORKDIR 可寫)且內容為 DENIED\
-             (證明白名單外的寫入被 sandbox 擋下)。空字串 = 探針從未寫成功,\
-             代表 WORKDIR 白名單或 sandbox-exec 呼叫本身有問題"
+            verdict, "outside=DENIED cfg=ALLOWED",
+            "verdict.txt 必須存在(證明 WORKDIR 可寫)且內容為 outside=DENIED\
+             cfg=ALLOWED(白名單外的寫入被 sandbox 擋下,CONFIG_DIR 白名單內\
+             的寫入真的被放行)。空字串 = 探針從未寫成功,代表 WORKDIR 白名單\
+             或 sandbox-exec 呼叫本身有問題"
+        );
+        assert!(
+            !process_alive(pid),
+            "session drop 後,sandbox-exec 包裝下的子行程仍必須被 teardown 收掉"
         );
     }
 

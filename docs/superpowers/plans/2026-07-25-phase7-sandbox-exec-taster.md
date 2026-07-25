@@ -472,7 +472,13 @@ Expected: GUI 視窗出現雙 pane,taster pane 出現 claude TUI 畫面。
 
 在 taster pane 目視檢查啟動輸出,**特別找 `Operation not permitted`**。Phase 1 實測抓過 hook 因 `/dev/null` 未白名單而靜默失敗的案例;現行 profile 已補該缺口,但要確認正式管線下沒有新的缺口。
 
-Expected: taster pane 完成開機、進入可接收輸入的 TUI 狀態,且**沒有** `Operation not permitted`。若有,記下**完整路徑**——那就是 profile 缺的白名單項。
+⚠️ **先讀這段,再看到 `Operation not permitted` 就急著加白名單**:claude CLI 是原生安裝在 `~/.local/share/claude/versions/…`(執行檔在 `~/.local/bin/claude`),啟動時會跑自己的 auto-updater,嘗試寫入這個安裝目錄。現行 profile 除了 `CONFIG_DIR` 之外**不放行任何 `$HOME` 路徑**,所以 taster 底下這個 auto-updater 的寫入**必然**被拒、**必然**印出 `Operation not permitted`。這是**預期行為,不是缺口**,而且是**刻意的**——taster 是直接碰不可信輸入的那一端,若因為看到這行錯誤就把 `~/.local/share/claude/…`、`~/.local/bin/claude` 這類 CLI 自身安裝目錄加進白名單,等於讓一個被惡意輸入包圍的行程拿到寫自己執行檔的權限,比 Phase 7 之前(完全沒有 OS sandbox)還要糟。
+
+標準規則:**只有「拒絕會讓管線壞掉」的路徑才是白名單候選**——具體判準是 Step 3/4 的端到端流程(消息進、outbox 產物出、Telegram 收到回覆)是否因此中斷。CLI 自身安裝目錄的寫入被拒,不會讓上述流程中斷(auto-update 失敗不影響已安裝版本的執行),所以**不通過**這個判準,不得列入白名單。
+
+實務後果需留意並記錄:taster 停止接收 CLI 版本更新,而 cyrano(未套 sandbox)仍持續更新——長期下來兩邊 CLI 版本可能漂移不同步。這是本次已知、可接受的取捨,寫進 Step 6 的記錄裡。
+
+Expected: taster pane 完成開機、進入可接收輸入的 TUI 狀態。若 `Operation not permitted` 出現在 `~/.local/share/claude/…`、`~/.local/bin/claude`,或任何 `CONFIG_DIR` 以外的 `$HOME` 路徑下——這是預期的,**不要**加白名單,只需記下完整路徑供 Step 6 記錄。若 `Operation not permitted` 出現在其他地方(例如 `CONFIG_DIR`/`WORKDIR` 底下,或導致管線功能中斷),才需要記下**完整路徑**當作真正的白名單缺口。
 
 ⚠️ **不要用 `ps`/`pgrep` 檢查有沒有 `sandbox-exec` 行程**:實測確認 `sandbox-exec` 是 exec-in-place,taster 的 `command` 欄位在接線成功時**仍然只會顯示 `claude`**。看不到 `sandbox-exec` 不代表沒接上。正向驗證改用 Step 5 的反向對照。
 
@@ -561,10 +567,10 @@ cargo test --manifest-path src-tauri/Cargo.toml adapters::pty -- --ignored
 Expected: 兩個 `wait_idle` 測試通過(它們在全 workspace 高並行下會偶發假失敗,故平時 `#[ignore]`,見 `pty.rs` 內註解)。
 
 ```bash
-git grep -n "HOME_CLAUDE" -- templates/ src-tauri/
+git grep -n "HOME_CLAUDE" -- templates/
 ```
 
-Expected: 無輸出(舊參數名已完全移除)。
+Expected: 無輸出(舊參數名已從 profile 與文件完全移除)。刻意排除 `src-tauri/`:`pty.rs` 的 `profile_params_match_argv_params` 測試是本計畫自己要求的漂移防護,測試斷言與訊息裡合法地提到字面 `"HOME_CLAUDE"`(用來確認 profile *不* 含它)——若把 `src-tauri/` 也納入這個 gate,計畫會要求自己交付的程式碼讓自己的檢核失敗,不可能同時滿足。
 
 ```bash
 git diff --stat main..HEAD -- src-tauri/src/bin/smoke.rs

@@ -66,3 +66,4 @@
 - **不加跨平台判斷**:直接假設 macOS,不寫 `cfg(target_os)` 或非 macOS fallback。專案目前完全是 macOS 專屬,YAGNI——不為不存在的需求寫防禦性程式碼。
 - **不做動態 profile 組合**(例如依 `config_dir` 是否為 `Some` 動態拼接 profile 字串的不同段落):改用「`config_dir` 為 `None` 時整個跳過 sandbox 包裝」這個更簡單的規則達到同樣效果,避免維護兩份 profile 片段拼接邏輯的複雜度。
 - **不改 `smoke.rs`**:它傳 `None` 是刻意設計(驗證不含 `CLAUDE_CONFIG_DIR` 隔離的基準線),本次的「`config_dir` 為 `Some` 才套用 sandbox」規則自然讓它維持現狀,不需要改動這個檔案。
+- **不切分 taster/cyrano 的 `CONFIG_DIR`**:`gui.rs` 把同一個 `cli_config` 同時傳給 taster 與 cyrano(單一登入,避免 OAuth token-family 因雙帳號而 rotate),這是更早階段的既有決策,本次不變動。後果是本次的 OS sandbox 白名單把 taster 的寫入權放到這個雙方共用的目錄——`settings.json`、`plugins/`、`.claude.json` 對 taster 而言在檔案系統層是可寫的,OS 層因此**不隔離 taster 與 cyrano**。目前擋下「taster 寫壞 cyrano 讀的設定來下毒」這條路徑的,是 Claude Code 權限層(taster 零工具,沒有任何管道能主動寫檔案),不是本次新增的 OS sandbox。這是未來評估 cyrano 是否也要接 OS sandbox 時的已知輸入之一。

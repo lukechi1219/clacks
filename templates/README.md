@@ -15,13 +15,17 @@ cp -R templates/cyrano/ ../clacks-runtime/cyrano/  # Phase 4 回應者
 
 注意:`../clacks-runtime/*/outbox/`、transcript 等執行期產物只存在 live 側,不回流 repo。
 
-## OS sandbox profile(未佈線,opt-in)
+## OS sandbox profile(taster 已接線,cyrano 未接線)
 
-`templates/sandbox/clacks.sb` 是 `sandbox-exec -f` 用的 macOS sandbox profile 正本(檔案系統隔離為主:唯讀為預設,寫入白名單;網路無法全禁,靠檔案系統層隔離)。**目前未佈線進 `ClaudePtySession::spawn`**——經 portable-pty spawn 的包裝屬 Phase 5(隨 GUI 一併做),此階段只是把 skeleton 實證過的正本(含 `/dev/null` 缺口修正)落 `templates/` 供之後接線,也可手動套用驗證:
+`templates/sandbox/clacks.sb` 是 `sandbox-exec` 用的 macOS sandbox profile 正本(檔案系統隔離為主:唯讀為預設,寫入白名單;網路無法全禁,靠檔案系統層隔離)。**taster 自 Phase 7 起已佈線**——`ClaudePtySession::spawn`(`src-tauri/src/adapters/pty.rs` 的 `taster_argv()`)在 `config_dir` 為 `Some` 時,把原本的裸 `claude` 包成 `sandbox-exec -p <inline profile> -D WORKDIR=… -D CONFIG_DIR=… claude`。**cyrano(`spawn_continue`)刻意仍未套用**——目前只有 Claude Code 權限層(deny 一切工具、僅 allow 白名單目錄的 `Read`)做隔離,OS sandbox 留待未來獨立評估。
+
+⚠️ `templates/sandbox/` 是 `templates/` 底下**唯一不由 `cp -R` 部署**的子目錄:`clacks.sb` 的內容經 `include_str!` 在編譯期內嵌進 Rust 二進位,執行期用 `-p` 傳 inline 字串,不會在執行期解析檔案路徑。改 `clacks.sb` 的內容之後,要讓改動生效必須 `cargo build`(或 `cargo run`/`cargo test`),**不是** `cp -R` 到 `../clacks-runtime/`——那裡本來就沒有這個檔案。
+
+手動套用驗證(路徑需自行代換,`CONFIG_DIR` 對應呼叫端傳入 `spawn()` 的 `config_dir`,即 `../clacks-runtime/cli-config`):
 
 ```bash
 sandbox-exec -D WORKDIR="$(pwd)/../clacks-runtime/taster" \
-  -D HOME_CLAUDE="$HOME/.claude" \
+  -D CONFIG_DIR="$(pwd)/../clacks-runtime/cli-config" \
   -f templates/sandbox/clacks.sb claude
 ```
 
