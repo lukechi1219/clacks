@@ -466,7 +466,12 @@ mod tests {
         let pid = session.child.process_id().expect("child 應有 pid");
 
         let verdict_path = work.join("verdict.txt");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // 逾時取寬(60s):迴圈一看到內容就 break,happy path 不會多花時間,
+        // 這個值只在失敗時才生效。原本的 10s 在預設 8-way 並行的 full-suite
+        // 下實測會被吃穿(本檔另外兩個 wait_idle 測試也是同一種資源競爭,
+        // 它們選擇 #[ignore];這裡改放寬逾時,讓測試留在預設 suite 裡跑——
+        // 被 ignore 的測試等於不存在)。--test-threads=2 下原本就穩定通過
+        let deadline = Instant::now() + Duration::from_secs(60);
         let verdict = loop {
             if let Ok(content) = std::fs::read_to_string(&verdict_path) {
                 if !content.is_empty() {
