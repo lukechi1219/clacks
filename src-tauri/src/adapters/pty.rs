@@ -91,13 +91,19 @@ pub struct ClaudePtySession {
 impl ClaudePtySession {
     /// output:PTY 輸出的去向(骨架/smoke 用 stdout;GUI 期換成事件流)。
     /// workdir 必須在 repo 目錄樹外(祖先 CLAUDE.md 污染,骨架實證)——
-    /// 呼叫端(composition root)負責給對路徑。重啟仍為純 `claude`(taster 語意)
+    /// 呼叫端(composition root)負責給對路徑。
+    /// config_dir 為 Some 時包進 sandbox-exec(檔案系統隔離,見 taster_argv);
+    /// 重啟沿用同一份 argv,語意仍是全新 `claude`(taster 無記憶)
     pub fn spawn(
         workdir: &Path,
         config_dir: Option<&Path>,
         make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
     ) -> Result<Self, CliError> {
-        Self::spawn_program(&["claude"], vec!["claude".to_string()], workdir, config_dir, make_output)
+        // taster_argv 的輸出同時當初次 argv 與 respawn_argv:單一來源,
+        // 結構上不可能發生「首次有 sandbox、重啟後沒有」的靜默安全倒退
+        let argv = taster_argv(workdir, config_dir);
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        Self::spawn_program(&argv_refs, argv.clone(), workdir, config_dir, make_output)
     }
 
     /// cyrano 專用:首次啟動全新對話,重啟以 `claude --continue` 續談。

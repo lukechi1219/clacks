@@ -123,7 +123,7 @@ bot 加入指定 chat group,回覆一句對話時,取該群組**前 3~5 句訊�
 | 層 | taster（消毒者） | cyrano（回應者） |
 |---|---|---|
 | **Claude Code 權限** | 專屬 settings：deny 所有工具（Bash/Edit/Write/Read/Web 全鎖），純文字分析 | deny 一切，僅 allow `Read` 且 path 限定白名單專案目錄（設定檔可調） |
-| **OS sandbox** | macOS `sandbox-exec` profile：**檔案系統隔離為主**——`deny file-write*` + 白名單（工作目錄的 transcript / outbox、`~/.claude`、`/dev/null` 等必要 device、tmp）。**網路無法全禁**（CLI 必須連 Anthropic API），僅能限制到「允許 API 連線」 | 同左 + 白名單專案目錄唯讀 |
+| **OS sandbox** | macOS `sandbox-exec` profile：**檔案系統隔離為主**——`deny file-write*` + 白名單（工作目錄的 transcript / outbox、`CLAUDE_CONFIG_DIR` 指向的設定目錄、`/dev/null` 等必要 device、tmp）。**網路無法全禁**（CLI 必須連 Anthropic API），僅能限制到「允許 API 連線」。**已接線**（Phase 7，見 [phase7 設計](2026-07-25-phase7-sandbox-exec-taster-design.md)） | **設計上該有，尚未接線**——原規劃為「同左 + 白名單專案目錄唯讀」，profile 細節未落地。Phase 7 只接 taster（直接碰不可信輸入、風險最高的一端），cyrano 留待未來獨立評估。目前 cyrano 的隔離只有 Claude Code 權限層（deny 一切、僅 allow 白名單目錄的 `Read`） |
 | **資料驗證** | 輸出必須符合 JSON 契約，Rust 嚴格驗證（空回覆 / 格式不符一律判 failed，不放行） | 輸入只有消毒後純文字；回覆由 Rust 送出，碰不到 bot token |
 
 taster「無記憶 + 零工具」是 injection 防禦的關鍵：攻擊訊息既無工具可劫持、無歷史可污染，唯一輸出又被 schema 卡死。
