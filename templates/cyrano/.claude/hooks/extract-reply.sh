@@ -52,6 +52,10 @@ while [ "$attempt" -lt "$RETRY_MAX_ATTEMPTS" ]; do
   sleep "$RETRY_INTERVAL"
 done
 
+if [ "$attempt" -ge "$RETRY_MAX_ATTEMPTS" ]; then
+  echo "[extract-reply] retry budget exhausted (${RETRY_MAX_ATTEMPTS} attempts), emitting possibly-stale entry uuid=$candidate_uuid" >&2
+fi
+
 reply="$candidate_text"
 
 # rename-into-place(skeleton findings, final review):.partial 寫完再 mv
