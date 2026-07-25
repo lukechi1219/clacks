@@ -38,6 +38,38 @@ pub fn bracketed_paste(text: &str) -> Vec<u8> {
     bytes
 }
 
+/// sandbox profile 編譯期內嵌:執行期用 `sandbox-exec -p` 傳 inline 字串,
+/// 不做執行期檔案路徑解析。刻意如此——Phase 6 踩過「templates/ 改了但 runtime
+/// 目錄沒同步」的部署漂移,內嵌讓 profile 沒有可漏同步的執行期路徑。
+/// 代價:改 profile 內容需重新編譯(change 頻率低,可接受)
+const SANDBOX_PROFILE: &str = include_str!("../../../templates/sandbox/clacks.sb");
+
+/// taster 的 argv。config_dir 為 Some(生產路徑:gui.rs / bin/pipeline.rs)時
+/// 包進 sandbox-exec 做檔案系統隔離;None(bin/smoke.rs 的無隔離基準線)時
+/// 維持純 claude。
+///
+/// spawn() 以本函式的輸出**同時**作為初次 argv 與 respawn_argv——單一來源,
+/// 結構上保證重啟後仍在 sandbox 內(重啟掉出 sandbox 是靜默的安全倒退)。
+///
+/// workdir / config_dir 必須是 canonical 絕對路徑(呼叫端已 canonicalize):
+/// sandbox 以 real path 比對 subpath,含 symlink 的路徑會比不中而讓寫入被拒。
+/// 本函式刻意不做 canonicalize——它是純函式,不碰 IO
+fn taster_argv(workdir: &Path, config_dir: Option<&Path>) -> Vec<String> {
+    let Some(cfg) = config_dir else {
+        return vec!["claude".to_string()];
+    };
+    vec![
+        "sandbox-exec".to_string(),
+        "-p".to_string(),
+        SANDBOX_PROFILE.to_string(),
+        "-D".to_string(),
+        format!("WORKDIR={}", workdir.display()),
+        "-D".to_string(),
+        format!("CONFIG_DIR={}", cfg.display()),
+        "claude".to_string(),
+    ]
+}
+
 pub struct ClaudePtySession {
     writer: Box<dyn Write + Send>,
     artifact_rx: Receiver<PathBuf>,
@@ -313,6 +345,132 @@ mod tests {
     #[test]
     fn empty_text_still_produces_envelope() {
         assert_eq!(bracketed_paste(""), b"\x1b[200~\x1b[201~");
+    }
+
+    // taster 專用包裝:生產路徑(config_dir = Some)必須包進 sandbox-exec
+    #[test]
+    fn taster_argv_wraps_in_sandbox_when_config_dir_present() {
+        let argv = taster_argv(Path::new("/tmp/work"), Some(Path::new("/tmp/cfg")));
+        assert_eq!(
+            argv,
+            vec![
+                "sandbox-exec".to_string(),
+                "-p".to_string(),
+                SANDBOX_PROFILE.to_string(),
+                "-D".to_string(),
+                "WORKDIR=/tmp/work".to_string(),
+                "-D".to_string(),
+                "CONFIG_DIR=/tmp/cfg".to_string(),
+                "claude".to_string(),
+            ]
+        );
+    }
+
+    // bin/smoke.rs 的無隔離基準線(config_dir = None)不套 sandbox,維持原行為
+    #[test]
+    fn taster_argv_is_plain_claude_without_config_dir() {
+        assert_eq!(
+            taster_argv(Path::new("/tmp/work"), None),
+            vec!["claude".to_string()]
+        );
+    }
+
+    // profile 與呼叫端的參數名漂移防護(Global Constraints 5):profile 引用了
+    // (param "X") 而呼叫端沒給 -D X=,sandbox-exec 會 exit 65 硬失敗、taster
+    // 完全起不來。本測試讓漂移在 cargo test 就爆,而不是在真機才發現
+    #[test]
+    fn profile_params_match_argv_params() {
+        assert!(
+            SANDBOX_PROFILE.contains(r#"(param "WORKDIR")"#),
+            "profile 必須引用 WORKDIR"
+        );
+        assert!(
+            SANDBOX_PROFILE.contains(r#"(param "CONFIG_DIR")"#),
+            "profile 必須引用 CONFIG_DIR"
+        );
+        assert!(
+            !SANDBOX_PROFILE.contains("HOME_CLAUDE"),
+            "舊參數名 HOME_CLAUDE 必須已移除:呼叫端不再傳它,留著會讓 sandbox-exec 啟動失敗"
+        );
+    }
+
+    /// sandbox 行為測試的 scratch 根目錄。
+    ///
+    /// 刻意不用 tempfile:macOS 的 tempdir 落在 /var/folders(canonical
+    /// /private/var/folders),而 profile 白名單本來就放行該 subpath——拿它當
+    /// 「白名單外」的對照組會驗不出任何東西(測試會假通過)。
+    /// src-tauri/target/ 已 gitignore,且不在任何白名單 subpath 內,適合當對照組
+    fn sandbox_scratch_root() -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/sandbox-tests");
+        std::fs::create_dir_all(&root).expect("建 scratch 根目錄");
+        // canonicalize:sandbox 以 real path 比對 subpath(Global Constraints 6)
+        std::fs::canonicalize(&root).expect("canonicalize scratch 根目錄")
+    }
+
+    // taster_argv 產出的包裝必須真的把 sandbox 套上去:WORKDIR 內可寫、
+    // WORKDIR 外被拒。用 sh 當 claude 的替身(不需要真的跑 claude),但
+    // sandbox-exec 包裝、profile、-D 參數全部走 taster_argv 的真實輸出
+    #[test]
+    fn sandbox_allows_workdir_write_and_denies_outside() {
+        let root = sandbox_scratch_root();
+        let work = root.join("allow-deny-work");
+        let cfg = root.join("allow-deny-cfg");
+        let outside = root.join("allow-deny-outside");
+        for dir in [&work, &cfg, &outside] {
+            let _ = std::fs::remove_dir_all(dir);
+            std::fs::create_dir_all(dir).expect("建測試目錄");
+        }
+        // spawn_program 會對 workdir/outbox 註冊 watcher,目錄必須存在
+        std::fs::create_dir_all(work.join("outbox")).expect("建 outbox");
+
+        // 取 taster_argv 的真實輸出,只把最後的 "claude" 換成 sh 探針。
+        // 注意 cfg.as_path():Option<&PathBuf> 不會自動 deref 成 Option<&Path>
+        // (deref coercion 不穿透 Option),寫 Some(&cfg) 會編不過
+        let mut argv = taster_argv(&work, Some(cfg.as_path()));
+        assert_eq!(argv.pop().as_deref(), Some("claude"), "最後一個元素應為 claude");
+        // 白名單外寫入成功與否寫進 verdict.txt(它本身落在 WORKDIR 內)——
+        // 檔案存在即證明 WORKDIR 可寫,內容則證明白名單外被拒
+        argv.push("sh".to_string());
+        argv.push("-c".to_string());
+        argv.push(format!(
+            "if echo x > '{outside}/probe.txt' 2>/dev/null; \
+             then v=ALLOWED; else v=DENIED; fi; \
+             printf 'outside=%s' \"$v\" > '{work}/verdict.txt'",
+            outside = outside.display(),
+            work = work.display(),
+        ));
+
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let session = ClaudePtySession::spawn_program(
+            &argv_refs,
+            argv.clone(),
+            &work,
+            Some(cfg.as_path()),
+            Box::new(|| Box::new(std::io::sink())),
+        )
+        .expect("sandbox-exec 包裝下應可 spawn");
+
+        let verdict_path = work.join("verdict.txt");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let verdict = loop {
+            if let Ok(content) = std::fs::read_to_string(&verdict_path) {
+                if !content.is_empty() {
+                    break content;
+                }
+            }
+            if Instant::now() >= deadline {
+                break String::new();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        drop(session);
+
+        assert_eq!(
+            verdict, "outside=DENIED",
+            "verdict.txt 必須存在(證明 WORKDIR 可寫)且內容為 DENIED\
+             (證明白名單外的寫入被 sandbox 擋下)。空字串 = 探針從未寫成功,\
+             代表 WORKDIR 白名單或 sandbox-exec 呼叫本身有問題"
+        );
     }
 
     /// pgrep 等價檢查:ps -p 對已 reap 的 pid 回非零 exit code
