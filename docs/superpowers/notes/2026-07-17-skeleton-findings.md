@@ -322,4 +322,23 @@ Checklist 全數完成:
 1. 人工輸入通道與 30s Telegram long-poll 共用同一 thread,worst-case 延遲 ~28-30s(真機量測確認)
 2. Stop hook(`extract-reply.sh`)讀 transcript 早於 CLI 寫入完成的競態——依 session 有無先前內容,分岔成「空白」(taster 逐則 /clear、fail-closed 安全但訊息漏失)或「內容誤送」(cyrano --continue,答非所問的錯誤內容被實際送出,風險較高)。連發與 respawn 後首次注入皆可觸發,是同一根因。
 
+## Phase 6 真機複測(2026-07-25,質化,未精確量測)
+
+延續上一節的 2 項已知限制,Phase 6(commit `8a288b6`)修完後在真機跑了一輪複測。**本節記錄有一個明確缺口:使用者這輪測試沒有記錄具體次數/秒數,以下是質化觀察,不是精確量測——若之後需要校準 `RETRY_MAX_ATTEMPTS`/`RETRY_INTERVAL` 或進一步驗證 `GETUPDATES_LONGPOLL_SECS`,仍需要補一輪帶精確數字的複測。**
+
+**環境**:`templates/{taster,cyrano}/.claude/hooks/extract-reply.sh` 已部署到 `../clacks-runtime/{taster,cyrano}/`(部署前已用 `diff` 確認與 repo 一致);GUI 透過 `npm run dev`(vite dev server,監聽 5173)+ `cargo run --bin clacks-gui` 啟動(純 `cargo run` 在 debug build 下會走 `devUrl` 而非 `frontendDist`,漏開 `npm run dev` 會導致空白視窗——這是 bug #2 修完後殘留的操作前提,本次複測踩過一次,已排除)。
+
+**修法 A(hook 讀檔競態,uuid 重試迴圈)**:
+- 使用者描述:連發、respawn、taster 全新 session 三種情境「都測試正常」,且觀察到「輪流讀檔」的行為(可能指觀察到重試迴圈運作中,或 `.last-uuid` 隨每輪更新——未進一步釐清是哪一種觀察)。
+- 未記錄:各情境實際測試次數、是否有出現任何一次失敗(stale duplicate 或 EmptyReply)、`.last-uuid` 內容是否確實隨每輪成功回覆更新。
+- 對照 Phase 5 findings 的已知失敗基準(連發 1/5 誤送、respawn 撞同一競態):本輪未回報任何一次重現該症狀,方向上支持修法有效,但因未逐次記錄,**不能排除低機率殘留**(Phase 5 的失敗率本身就是 1/5,若本輪測試次數不夠多,單看「沒觀察到失敗」不足以推翻殘留機率)。
+
+**修法 B(getUpdates 逾時縮短)**:
+- 使用者確認「延遲有驗證」,但未提供具體秒數。方向上與縮短 `timeout=30`→`5` 的預期一致,未記錄是否真的落在 ~5-10 秒區間(對照舊基準 ~28-30 秒)。
+
+**待補(下一輪複測,若要動 `RETRY_MAX_ATTEMPTS`/`RETRY_INTERVAL` 或進一步確認 B 的延遲區間才需要)**:
+1. 連發/respawn/taster 全新 session 三情境各自的測試次數與逐次結果(比照 Phase 5 findings「設計輸入 A 連發測試」的記錄方式:引用 outbox 產物 + `.last-uuid` 內容直接對照,而非口頭描述)。
+2. 人工輸入延遲的碼表實測秒數(至少 3 次獨立量測)。
+3. 若上述任一項發現失敗案例,依 `templates/*/hooks/extract-reply.sh` 註解裡的校準空間(`RETRY_INTERVAL=0.1`、`RETRY_MAX_ATTEMPTS=20`)調整並在獨立 commit 中揭露變更原因。
+
 **Phase 5(Task 1-12)全數完成**。三個真機 bug 已修並 commit;兩項已知限制記錄在案、待後續 phase 決定是否修復。
