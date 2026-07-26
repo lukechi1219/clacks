@@ -1,21 +1,34 @@
-;; clacks OS sandbox profile(sandbox-exec -f)。
+;; clacks OS sandbox profile。
+;;
+;; 本檔**不部署到 runtime 目錄**(與 templates/ 底下其他檔案不同):
+;; src-tauri/src/adapters/pty.rs 以 include_str! 在編譯期內嵌本檔內容,執行期
+;; 用 `sandbox-exec -p <內嵌字串>` 傳入。這是刻意的——Phase 6 踩過「templates/
+;; 改了但 runtime 目錄沒同步」的部署漂移坑,內嵌讓 profile 沒有執行期路徑可以漏
+;; 同步。代價:改本檔內容需要重新編譯 src-tauri。
+;;
 ;; 以 skeleton 實證正本(2026-07-17-sandbox-echo.sb.example)為底,補 skeleton
 ;; 抓到的 /dev/null 缺口(deny file-write* 曾擋掉 hook 的 /dev/null 寫入)。
 ;;
 ;; 檔案系統隔離為主(唯讀為預設,寫入白名單);網路無法全禁(claude 必須連
 ;; Anthropic API)——allow default 保留網路,隔離靠檔案系統層(設計文件裁決)。
 ;;
-;; 參數(呼叫端以 -D 傳入):
-;;   WORKDIR      = runtime 工作目錄(../clacks-runtime/taster 或 cyrano)
-;;   HOME_CLAUDE  = ~/.claude(OAuth、設定)
-;; 例:sandbox-exec -D WORKDIR=$(pwd)/../clacks-runtime/taster \
-;;                  -D HOME_CLAUDE="$HOME/.claude" -f templates/sandbox/clacks.sb claude
+;; 參數(呼叫端 taster_argv() 以 -D 傳入,兩個都必填):
+;;   WORKDIR     = taster 的 runtime 工作目錄(../clacks-runtime/taster)
+;;   CONFIG_DIR  = CLAUDE_CONFIG_DIR 指向的設定/OAuth 目錄
+;;                 (../clacks-runtime/cli-config)。Phase 2/4 起 CLI 的設定寫入
+;;                 已由 CLAUDE_CONFIG_DIR 重定向至此,不再是 ~/.claude
+;;
+;; 兩個路徑都必須是 canonical 絕對路徑:sandbox 以 real path 比對 subpath,
+;; 含 symlink 的路徑會比不中而讓寫入被拒。呼叫端(gui.rs / bin/pipeline.rs)
+;; 已 canonicalize ../clacks-runtime。
+;; 少給任一個 -D 會讓 sandbox-exec 以 exit 65 硬失敗(fail-closed,不會退回無
+;; sandbox 執行)——實測訊息:invalid data type of path filter
 (version 1)
 (allow default)
 (deny file-write*)
 (allow file-write*
   (subpath (param "WORKDIR"))
-  (subpath (param "HOME_CLAUDE"))
+  (subpath (param "CONFIG_DIR"))
   (subpath "/private/tmp")
   (subpath "/private/var/folders")
   ;; skeleton 缺口修正:hook 與工具鏈需寫這些 device,否則靜默失敗
