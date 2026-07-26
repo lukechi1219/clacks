@@ -29,8 +29,19 @@ pub const IDLE_QUIET: Duration = Duration::from_millis(750);
 pub const IDLE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// cyrano transcript(JSONL)大小門檻,超過即應在 Idle 時注入 /compact。
-/// 粗估值,待真實 transcript 量測校正;/compact 佈線屬 Phase 4
-/// (需 port 擴充提供估算輸入),本 phase 先落純決策
+/// 粗估值,待真實 transcript 量測校正。
+///
+/// ⚠ **本常數與 should_compact() 至今零消費端**(截至 Phase 7)。純決策在
+/// Phase 3 落地,佈線原訂 Phase 4、改推 Phase 5,Phase 5 列入「刻意不做」後
+/// 未再排程。缺的兩塊:(1)`CliSession` 沒有取得 transcript 大小的方法,
+/// 估算輸入無從取得;(2)`core::pipeline::Action` 沒有 CompactCyrano 變體。
+/// 接線的第一個決定是 architecture.md 的 port 預算(擴充 CliSession 介面
+/// vs. 讓 outbox adapter 順帶回報大小),故不是隨手可做的小事。
+///
+/// 為何一直沒被發現:本函式是 pub,lib crate 的 pub 項目不觸發 dead_code
+/// lint;兩個單元測試又照常亮綠燈——測試證明的是邏輯正確,不是有被呼叫。
+/// 實務上 claude CLI 內建 auto-compact 會兜底,不會爆 context;失去的是
+/// 「趁 Idle 才壓縮」的時機控制,以及 GUI 顯示 context 壓力的能力
 pub const COMPACT_THRESHOLD_BYTES: u64 = 512 * 1024;
 
 pub fn should_compact(transcript_bytes: u64) -> bool {

@@ -41,14 +41,20 @@ clacks/
 │   │   ├── contract.rs       # taster JSON 契約型別 + 嚴格 schema 驗證
 │   │   ├── envelope.rs       # 不可信訊息的信封包裝(消毒指示模板)
 │   │   └── session.rs        # /clear、/compact 觸發決策(輸入估算值,輸出決定)
+│   │                         # ⚠ /compact 側(should_compact)尚無消費端,見下方註記
 │   ├── ports.rs         # trait 定義 — core 與外界的唯一介面
 │   ├── adapters/        # port 的具體實作
-│   │   ├── telegram.rs       # TelegramGateway:teloxide/reqwest 打 Bot API
+│   │   ├── telegram.rs       # TelegramGateway:reqwest 直打 Bot API
 │   │   ├── pty.rs            # CliSession:portable-pty 管理互動式 claude
 │   │   ├── outbox.rs         # notify 監看 outbox/,轉成事件餵給 orchestrator
 │   │   └── store.rs          # MessageStore:rusqlite(update_id 去重、訊息歷史)
 │   ├── app.rs           # orchestrator:驅動 pipeline,只依賴 core + ports
-│   └── main.rs          # composition root:唯一的組裝點(建 adapter、注入、啟動)
+│   ├── gui.rs           # composition root(受支援部署路徑):Tauri 事件迴圈驅動
+│   ├── lib.rs           # 模組宣告(本 crate 是 lib + 多個 bin,無 main.rs)
+│   └── bin/
+│       ├── clacks-gui.rs     # GUI 入口薄殼:只呼叫 gui::run()
+│       ├── pipeline.rs       # dev-only headless 組裝點(Phase 5 起降級,見檔頭)
+│       └── smoke.rs          # Phase 2 echo 管線 smoke(config_dir=None 的基準線)
 ├── src/                 # React 前端 — 不分層(兩塊 xterm.js pane + 狀態顯示,保持薄)
 ├── templates/           # runtime 工作目錄的版控正本(角色 CLAUDE.md、settings、hooks);部署 = cp -R 到 ../clacks-runtime/
 └── (repo 外)../clacks-runtime/   # taster/、cyrano/ 工作目錄(CLAUDE.md 角色指示、settings、outbox)
@@ -61,7 +67,7 @@ clacks/
 1. **core → 無**:不 import tokio、tauri、任何 adapter。只有 std + serde
 2. **app(orchestrator)→ core + ports**:永不直接 import adapter
 3. **adapters → ports + core 型別**:實作 trait,彼此不互相依賴
-4. **main(composition root)是唯一知道具體型別的地方**:建構 adapter、注入 orchestrator
+4. **composition root 是唯一知道具體型別的地方**:建構 adapter、注入 orchestrator。受支援的組裝點是 `gui.rs`(Tauri);`bin/pipeline.rs`(dev-only headless)與 `bin/smoke.rs` 是同層的次要組裝點,同樣只在這一層碰具體型別
 
 違反規則的典型徵兆:core 裡出現 `async fn` 以外的 tokio 型別、orchestrator 裡出現 `rusqlite::` 或 `portable_pty::` 路徑。
 
@@ -72,9 +78,12 @@ clacks/
 | `TelegramGateway` | 拉 updates、送回覆 | teloxide / reqwest | 記錄呼叫的 fake |
 | `CliSession` | 注入 prompt、觀察 outbox 產物、重啟 | portable-pty + notify | 腳本化回應的 fake |
 | `MessageStore` | update_id 去重、訊息狀態落地 | rusqlite | in-memory HashMap |
-| `Clock` | 現在時刻(timeout 判斷用) | `SystemTime` | 手動撥針的 fake |
 
 Rust 的 async trait 有 boilerplate 稅(`async_trait` 或 RPITIT);port 數量是刻意的預算,新增第 6 個 port 前先問「能不能併進現有 port」。
+
+**已刪除的 port**:`Clock`(現在時刻,timeout 判斷用)在 Phase 2 定義、Phase 5 刪除——orchestrator 實際採注入 sleeper + port 內部 `recv_timeout`,`Clock` 從未有消費端。若未來要重新引入,先確認是誰在讀它,別重蹈只有 trait 沒有呼叫端的覆轍。
+
+**未接線的決策**:`core/session.rs` 的 `should_compact()`(cyrano transcript 超過門檻即應注入 `/compact`)目前**零消費端**——`CliSession` 沒有取得 transcript 大小的方法,`core/pipeline.rs` 的 `Action` 也沒有對應變體。接線的第一個問題就是本節的 port 預算(擴充 `CliSession` 介面 vs. 讓 outbox adapter 順帶回報),故 Phase 4 → Phase 5 連續推遲至今。實務上 claude CLI 內建的 auto-compact 會兜底,所以不會爆 context;失去的是「趁 Idle 才壓縮」的時機控制與 GUI 的壓力可觀測性。
 
 ## 測試策略對應
 
