@@ -4,3 +4,4 @@ src-tauri/gen/
 /.idea/
 node_modules/
 /dist/
+.DS_Store
