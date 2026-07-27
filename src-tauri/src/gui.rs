@@ -186,7 +186,7 @@ fn pipeline_thread(app: AppHandle, running: Arc<AtomicBool>, input_rx: Receiver<
         }
     };
     // cyrano 重啟以 --continue 續談(真機驗證項見 Task 9)
-    let mut cyrano = match ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), cyrano_factory) {
+    let mut cyrano = match ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), None, cyrano_factory) {
         Ok(s) => s,
         Err(e) => {
             let _ = app.emit("fatal", format!("spawn cyrano: {}", e.0));

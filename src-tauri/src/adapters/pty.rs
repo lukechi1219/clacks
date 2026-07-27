@@ -44,8 +44,8 @@ pub fn bracketed_paste(text: &str) -> Vec<u8> {
 /// 代價:改 profile 內容需重新編譯(change 頻率低,可接受)
 const SANDBOX_PROFILE: &str = include_str!("../../../templates/sandbox/clacks.sb");
 
-/// taster 的 argv。config_dir 為 Some(生產路徑:gui.rs / bin/pipeline.rs)時
-/// 包進 sandbox-exec 做檔案系統隔離;None(bin/smoke.rs 的無隔離基準線)時
+/// sandbox 包裝的共用底座。config_dir 為 Some(生產路徑:gui.rs / bin/pipeline.rs)
+/// 時包進 sandbox-exec 做檔案系統隔離;None(bin/smoke.rs 的無隔離基準線)時
 /// 維持純 claude。
 ///
 /// spawn() 以本函式的輸出**同時**作為初次 argv 與 respawn_argv——單一來源,
@@ -54,7 +54,7 @@ const SANDBOX_PROFILE: &str = include_str!("../../../templates/sandbox/clacks.sb
 /// workdir / config_dir 必須是 canonical 絕對路徑(呼叫端已 canonicalize):
 /// sandbox 以 real path 比對 subpath,含 symlink 的路徑會比不中而讓寫入被拒。
 /// 本函式刻意不做 canonicalize——它是純函式,不碰 IO
-fn taster_argv(workdir: &Path, config_dir: Option<&Path>) -> Vec<String> {
+fn base_argv(workdir: &Path, config_dir: Option<&Path>) -> Vec<String> {
     let Some(cfg) = config_dir else {
         return vec!["claude".to_string()];
     };
@@ -68,6 +68,34 @@ fn taster_argv(workdir: &Path, config_dir: Option<&Path>) -> Vec<String> {
         format!("CONFIG_DIR={}", cfg.display()),
         "claude".to_string(),
     ]
+}
+
+/// cyrano 的 argv:sandbox 底座 + 唯讀目錄 + 續談旗標。
+///
+/// readable_dir 只在 config_dir 為 Some 時附加(smoke 基準線不加任何隔離參數)。
+/// resume 是初次(false)與重啟(true)的唯一差異——spawn_continue 以本函式產生
+/// 兩份 argv,結構上不可能發生「首次有 sandbox/--add-dir,重啟後沒有」的靜默倒退。
+///
+/// ⚠ --add-dir 不只授予檔案存取:CLI 會從該目錄載入 .claude/skills/、
+/// .claude/agents/ 與 settings.json 的 enabledPlugins/extraKnownMarketplaces。
+/// 擋這條注入面的是 adapters::config_file 的 .claude 啟動檢查,不是本函式
+fn cyrano_argv(
+    workdir: &Path,
+    config_dir: Option<&Path>,
+    readable_dir: Option<&Path>,
+    resume: bool,
+) -> Vec<String> {
+    let mut argv = base_argv(workdir, config_dir);
+    if config_dir.is_some() {
+        if let Some(dir) = readable_dir {
+            argv.push("--add-dir".to_string());
+            argv.push(dir.display().to_string());
+        }
+    }
+    if resume {
+        argv.push("--continue".to_string());
+    }
+    argv
 }
 
 pub struct ClaudePtySession {
@@ -92,34 +120,35 @@ impl ClaudePtySession {
     /// output:PTY 輸出的去向(骨架/smoke 用 stdout;GUI 期換成事件流)。
     /// workdir 必須在 repo 目錄樹外(祖先 CLAUDE.md 污染,骨架實證)——
     /// 呼叫端(composition root)負責給對路徑。
-    /// config_dir 為 Some 時包進 sandbox-exec(檔案系統隔離,見 taster_argv);
+    /// config_dir 為 Some 時包進 sandbox-exec(檔案系統隔離,見 base_argv);
     /// 重啟沿用同一份 argv,語意仍是全新 `claude`(taster 無記憶)
     pub fn spawn(
         workdir: &Path,
         config_dir: Option<&Path>,
         make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
     ) -> Result<Self, CliError> {
-        // taster_argv 的輸出同時當初次 argv 與 respawn_argv:單一來源,
+        // base_argv 的輸出同時當初次 argv 與 respawn_argv:單一來源,
         // 結構上不可能發生「首次有 sandbox、重啟後沒有」的靜默安全倒退
-        let argv = taster_argv(workdir, config_dir);
+        let argv = base_argv(workdir, config_dir);
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         Self::spawn_program(&argv_refs, argv.clone(), workdir, config_dir, make_output)
     }
 
     /// cyrano 專用:首次啟動全新對話,重啟以 `claude --continue` 續談。
-    /// 真機驗證項(Task 9):`--continue` 能否恢復對話待證實,失敗 fallback = 全新 session
+    /// readable_dir = 設定檔指定的唯讀專案目錄(None = 無額外讀取範圍)。
+    ///
+    /// 初次與 respawn 兩份 argv 都出自 cyrano_argv——比照 spawn() 的單一來源
+    /// 不變式,重啟不可能掉出 sandbox 或掉失 --add-dir
     pub fn spawn_continue(
         workdir: &Path,
         config_dir: Option<&Path>,
+        readable_dir: Option<&Path>,
         make_output: Box<dyn FnMut() -> Box<dyn Write + Send> + Send>,
     ) -> Result<Self, CliError> {
-        Self::spawn_program(
-            &["claude"],
-            vec!["claude".to_string(), "--continue".to_string()],
-            workdir,
-            config_dir,
-            make_output,
-        )
+        let argv = cyrano_argv(workdir, config_dir, readable_dir, false);
+        let respawn_argv = cyrano_argv(workdir, config_dir, readable_dir, true);
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        Self::spawn_program(&argv_refs, respawn_argv, workdir, config_dir, make_output)
     }
 
     /// 測試縫:teardown/respawn 測試以 sleep/sh 代替 claude。生產路徑走 spawn/spawn_continue
@@ -356,7 +385,7 @@ mod tests {
     // taster 專用包裝:生產路徑(config_dir = Some)必須包進 sandbox-exec
     #[test]
     fn taster_argv_wraps_in_sandbox_when_config_dir_present() {
-        let argv = taster_argv(Path::new("/tmp/work"), Some(Path::new("/tmp/cfg")));
+        let argv = base_argv(Path::new("/tmp/work"), Some(Path::new("/tmp/cfg")));
         assert_eq!(
             argv,
             vec![
@@ -376,9 +405,104 @@ mod tests {
     #[test]
     fn taster_argv_is_plain_claude_without_config_dir() {
         assert_eq!(
-            taster_argv(Path::new("/tmp/work"), None),
+            base_argv(Path::new("/tmp/work"), None),
             vec!["claude".to_string()]
         );
+    }
+
+    // cyrano 生產路徑:sandbox 包裝 + --add-dir,重啟版本只多一個 --continue
+    #[test]
+    fn cyrano_argv_wraps_in_sandbox_with_add_dir() {
+        let argv = cyrano_argv(
+            Path::new("/tmp/cyrano"),
+            Some(Path::new("/tmp/cfg")),
+            Some(Path::new("/tmp/readable")),
+            false,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "sandbox-exec".to_string(),
+                "-p".to_string(),
+                SANDBOX_PROFILE.to_string(),
+                "-D".to_string(),
+                "WORKDIR=/tmp/cyrano".to_string(),
+                "-D".to_string(),
+                "CONFIG_DIR=/tmp/cfg".to_string(),
+                "claude".to_string(),
+                "--add-dir".to_string(),
+                "/tmp/readable".to_string(),
+            ]
+        );
+    }
+
+    // 唯讀目錄未設定時不得出現 --add-dir(空引數會讓 CLI 解析出錯)
+    #[test]
+    fn cyrano_argv_omits_add_dir_when_readable_dir_absent() {
+        let argv = cyrano_argv(Path::new("/tmp/cyrano"), Some(Path::new("/tmp/cfg")), None, false);
+        assert!(!argv.iter().any(|a| a == "--add-dir"), "不該有 --add-dir:{argv:?}");
+        assert_eq!(argv.last().unwrap(), "claude");
+    }
+
+    // smoke.rs 的無隔離基準線(config_dir = None):不包 sandbox、不加 --add-dir
+    #[test]
+    fn cyrano_argv_is_plain_claude_without_config_dir() {
+        assert_eq!(
+            cyrano_argv(Path::new("/tmp/cyrano"), None, Some(Path::new("/tmp/readable")), false),
+            vec!["claude".to_string()]
+        );
+        assert_eq!(
+            cyrano_argv(Path::new("/tmp/cyrano"), None, None, true),
+            vec!["claude".to_string(), "--continue".to_string()]
+        );
+    }
+
+    // 核心不變式(Phase 7 教訓的延伸):初次與重啟 argv 出自同一函式,
+    // 唯一差異是 --continue。差異超過這一項 = 重啟時隔離設定會漂移
+    #[test]
+    fn cyrano_respawn_argv_differs_only_by_continue_flag() {
+        let workdir = Path::new("/tmp/cyrano");
+        let cfg = Some(Path::new("/tmp/cfg"));
+        let readable = Some(Path::new("/tmp/readable"));
+
+        let initial = cyrano_argv(workdir, cfg, readable, false);
+        let respawn = cyrano_argv(workdir, cfg, readable, true);
+
+        let mut expected = initial.clone();
+        expected.push("--continue".to_string());
+        assert_eq!(respawn, expected);
+    }
+
+    // 漂移防護:兩份 argv 都必須帶著 sandbox 與 --add-dir。
+    // 未來有人把 spawn_continue 改回寫死字面量時,這條會擋下來
+    #[test]
+    fn both_cyrano_argvs_carry_sandbox_and_add_dir() {
+        let workdir = Path::new("/tmp/cyrano");
+        let cfg = Some(Path::new("/tmp/cfg"));
+        let readable = Some(Path::new("/tmp/readable"));
+
+        for resume in [false, true] {
+            let argv = cyrano_argv(workdir, cfg, readable, resume);
+            assert_eq!(argv[0], "sandbox-exec", "resume={resume} 未包 sandbox:{argv:?}");
+            assert!(argv.iter().any(|a| a == "--add-dir"), "resume={resume} 缺 --add-dir");
+        }
+    }
+
+    // cyrano 的權限模板不得放行不帶路徑的 Read——裸工具名在 Claude Code 的規則語意
+    // 裡代表「任何路徑」,等同讓 cyrano 讀取整台機器。這是 Phase 8 要修掉的那個缺口,
+    // 本測試存在的意義是擋住未來「順手」把它加回去
+    #[test]
+    fn cyrano_settings_do_not_allow_bare_read() {
+        const CYRANO_SETTINGS: &str =
+            include_str!("../../../templates/cyrano/.claude/settings.json");
+        let parsed: serde_json::Value = serde_json::from_str(CYRANO_SETTINGS).unwrap();
+        let allow = &parsed["permissions"]["allow"];
+        if let Some(rules) = allow.as_array() {
+            assert!(
+                !rules.iter().any(|rule| rule == "Read"),
+                "cyrano settings.json 的 allow 含裸 Read:{allow}"
+            );
+        }
     }
 
     // profile 與呼叫端的參數名漂移防護(Global Constraints 5):profile 引用了
@@ -413,9 +537,9 @@ mod tests {
         std::fs::canonicalize(&root).expect("canonicalize scratch 根目錄")
     }
 
-    // taster_argv 產出的包裝必須真的把 sandbox 套上去:WORKDIR 內可寫、
+    // base_argv 產出的包裝必須真的把 sandbox 套上去:WORKDIR 內可寫、
     // WORKDIR 外被拒。用 sh 當 claude 的替身(不需要真的跑 claude),但
-    // sandbox-exec 包裝、profile、-D 參數全部走 taster_argv 的真實輸出
+    // sandbox-exec 包裝、profile、-D 參數全部走 base_argv 的真實輸出
     #[test]
     fn sandbox_allows_workdir_write_and_denies_outside() {
         let root = sandbox_scratch_root();
@@ -429,10 +553,10 @@ mod tests {
         // spawn_program 會對 workdir/outbox 註冊 watcher,目錄必須存在
         std::fs::create_dir_all(work.join("outbox")).expect("建 outbox");
 
-        // 取 taster_argv 的真實輸出,只把最後的 "claude" 換成 sh 探針。
+        // 取 base_argv 的真實輸出,只把最後的 "claude" 換成 sh 探針。
         // 注意 cfg.as_path():Option<&PathBuf> 不會自動 deref 成 Option<&Path>
         // (deref coercion 不穿透 Option),寫 Some(&cfg) 會編不過
-        let mut argv = taster_argv(&work, Some(cfg.as_path()));
+        let mut argv = base_argv(&work, Some(cfg.as_path()));
         assert_eq!(argv.pop().as_deref(), Some("claude"), "最後一個元素應為 claude");
         // 白名單外寫入、以及 CONFIG_DIR 內寫入,成功與否都寫進 verdict.txt
         // (它本身落在 WORKDIR 內)——檔案存在即證明 WORKDIR 可寫,內容則同時
