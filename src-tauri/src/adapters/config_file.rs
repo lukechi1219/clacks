@@ -62,13 +62,26 @@ pub fn load_cyrano_readable_dir(config_path: &Path) -> Result<Option<PathBuf>, S
     // 是這個功能的預期用法,而真實專案帶 .claude/ 是常態——故結構性拒絕,
     // 不倚賴文件叮嚀。(CLAUDE.md 的載入另需 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD,
     // 已被 pty.rs 的 ENV_ALLOWLIST 擋在子行程之外)
+    //
+    // 用 symlink_metadata 而非 exists():exists() 會跟隨 symlink,懸空 symlink 與
+    // 讀取失敗(權限不足)都回 false 而放行——目標日後建立即生效。只有明確的
+    // NotFound 才放行,其餘一律拒絕(fail-closed)
     let dot_claude = resolved.join(".claude");
-    if dot_claude.exists() {
-        return Err(format!(
-            "cyrano_readable_dir 底下存在 .claude({}):--add-dir 會從中載入 skills/agents/plugin 設定,\
-             等同讓唯讀目錄的內容對 cyrano 下指令。請移除或改用不含 .claude 的目錄",
-            dot_claude.display()
-        ));
+    match std::fs::symlink_metadata(&dot_claude) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "無法確認 cyrano_readable_dir 底下是否存在 .claude({}):{error};無法排除注入面,拒絕啟動",
+                dot_claude.display()
+            ));
+        }
+        Ok(_) => {
+            return Err(format!(
+                "cyrano_readable_dir 底下存在 .claude({}):--add-dir 會從中載入 skills/agents/plugin 設定,\
+                 等同讓唯讀目錄的內容對 cyrano 下指令。請移除或改用不含 .claude 的目錄",
+                dot_claude.display()
+            ));
+        }
     }
 
     Ok(Some(resolved))
@@ -164,6 +177,41 @@ mod tests {
         std::fs::write(&path, r#"{"cyrano_readable_dir": "cyrano-readable"}"#).unwrap();
 
         assert!(load_cyrano_readable_dir(&path).is_err());
+    }
+
+    // 懸空 symlink:exists() 跟隨連結得 false 而放行,目標日後建立即生效
+    #[cfg(unix)]
+    #[test]
+    fn readable_dir_containing_dangling_dot_claude_symlink_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let readable = dir.path().join("cyrano-readable");
+        std::fs::create_dir(&readable).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("nonexistent"), readable.join(".claude")).unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(&path, r#"{"cyrano_readable_dir": "cyrano-readable"}"#).unwrap();
+
+        let error = load_cyrano_readable_dir(&path).unwrap_err();
+        assert!(error.contains(".claude"), "訊息未指出 .claude:{error}");
+    }
+
+    // 讀不到(權限不足)無法排除注入面,同樣拒絕而非放行
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_readable_dir_is_rejected_fail_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let readable = dir.path().join("cyrano-readable");
+        std::fs::create_dir(&readable).unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(&path, r#"{"cyrano_readable_dir": "cyrano-readable"}"#).unwrap();
+        std::fs::set_permissions(&readable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load_cyrano_readable_dir(&path);
+        // 先還原權限,tempdir 才清得掉
+        std::fs::set_permissions(&readable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.contains("無法確認"), "訊息未說明無法確認:{error}");
     }
 
     #[test]
