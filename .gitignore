@@ -5,3 +5,6 @@ src-tauri/gen/
 node_modules/
 /dist/
 .DS_Store
+
+# 實際生效的設定(從 clacks.config.example.json 複製);只放非機密設定
+/clacks.config.json

@@ -85,6 +85,7 @@ fn send_input(
 
 fn pipeline_thread(app: AppHandle, running: Arc<AtomicBool>, input_rx: Receiver<(String, Vec<u8>)>) {
     use crate::adapters::pty::ClaudePtySession;
+    use crate::adapters::config_file::{load_cyrano_readable_dir, CONFIG_FILE};
     use crate::adapters::store::SqliteStore;
     use crate::adapters::telegram::TelegramHttp;
     use crate::app::{Orchestrator, PipelineConfig};
@@ -166,6 +167,17 @@ fn pipeline_thread(app: AppHandle, running: Arc<AtomicBool>, input_rx: Receiver<
         }
     }
 
+    // Phase 8:cyrano 唯讀目錄。設定檔缺席 → None(退到更嚴格的無額外讀取範圍);
+    // 設定寫了但有問題 → fail-closed 拒絕啟動(Global Constraints 2)
+    let cyrano_readable = match load_cyrano_readable_dir(std::path::Path::new(CONFIG_FILE)) {
+        Ok(dir) => dir,
+        Err(error) => {
+            let _ = app.emit("fatal", error);
+            running.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+
     // ---- output 工廠(Task 3):每(re)spawn 產生 emitter → 各自 pane topic(Global Constraints 2) ----
     let app_t = app.clone();
     let taster_factory = Box::new(move || {
@@ -186,7 +198,7 @@ fn pipeline_thread(app: AppHandle, running: Arc<AtomicBool>, input_rx: Receiver<
         }
     };
     // cyrano 重啟以 --continue 續談(真機驗證項見 Task 9)
-    let mut cyrano = match ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), None, cyrano_factory) {
+    let mut cyrano = match ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), cyrano_readable.as_deref(), cyrano_factory) {
         Ok(s) => s,
         Err(e) => {
             let _ = app.emit("fatal", format!("spawn cyrano: {}", e.0));

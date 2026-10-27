@@ -12,6 +12,20 @@ The name comes from Terry Pratchett's *Going Postal*: the clacks are a network o
 
 Design phase. See the design document (zh-TW): [docs/superpowers/specs/2026-07-17-clacks-design.md](docs/superpowers/specs/2026-07-17-clacks-design.md)
 
+## Configuration
+
+Copy the example config and adjust it:
+
+```bash
+cp clacks.config.example.json clacks.config.json
+```
+
+- `cyrano_readable_dir` — a directory that cyrano (the responder) may read from, passed to the CLI as `--add-dir`. Relative paths resolve against the config file's directory. Omit the key entirely if cyrano should have no extra read scope.
+
+**This directory must not contain a `.claude` entry.** `--add-dir` loads Skills, Subagents, and plugin settings from the added directory, so a stray `.claude/` there would let its contents issue instructions to cyrano. The app refuses to start if it finds one.
+
+`clacks.config.json` is gitignored and holds **non-secret settings only** — the bot token reaches the backend exclusively through the `CLACKS_BOT_TOKEN` environment variable (injected from the macOS Keychain) and is never written to a file.
+
 ## Planned stack
 
 Tauri 2 + Rust (portable-pty, notify, rusqlite) · React 18 + TypeScript + Vite + xterm.js

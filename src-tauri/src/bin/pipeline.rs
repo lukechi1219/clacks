@@ -19,6 +19,7 @@
 //!   (CLACKS_BOT_TOKEN 不在白名單)結構性排除——見 adapters::pty
 //! - 不進錯誤字串:TelegramHttp 的 redact(without_url)+ error_for_status(Task 1)
 
+use clacks::adapters::config_file::{load_cyrano_readable_dir, CONFIG_FILE};
 use clacks::adapters::pty::ClaudePtySession;
 use clacks::adapters::store::SqliteStore;
 use clacks::adapters::telegram::TelegramHttp;
@@ -76,6 +77,10 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Phase 8:cyrano 唯讀目錄。dev-only bin 同樣不繞過隔離設定
+    let cyrano_readable = load_cyrano_readable_dir(std::path::Path::new(CONFIG_FILE))
+        .expect("load clacks.config.json");
+
     let gateway = TelegramHttp::from_env();
 
     // webhook 互斥檢查(骨架實證:掛著 webhook 時 getUpdates 必 409)
@@ -94,7 +99,7 @@ fn main() {
     let mut taster = ClaudePtySession::spawn(&taster_dir, Some(&cli_config), Box::new(|| Box::new(std::io::stdout())))
         .expect("spawn taster");
     // cyrano 重啟以 --continue 續談(真機驗證項見 Task 9)
-    let mut cyrano = ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), None, Box::new(|| Box::new(std::io::stdout())))
+    let mut cyrano = ClaudePtySession::spawn_continue(&cyrano_dir, Some(&cli_config), cyrano_readable.as_deref(), Box::new(|| Box::new(std::io::stdout())))
         .expect("spawn cyrano");
 
     eprintln!("[clacks] 等待雙 CLI 開機 15s");
