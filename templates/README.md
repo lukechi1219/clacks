@@ -15,9 +15,9 @@ cp -R templates/cyrano/ ../clacks-runtime/cyrano/  # Phase 4 回應者
 
 注意:`../clacks-runtime/*/outbox/`、transcript 等執行期產物只存在 live 側,不回流 repo。
 
-## OS sandbox profile(taster 已接線,cyrano 未接線)
+## OS sandbox profile(taster、cyrano 皆已接線)
 
-`templates/sandbox/clacks.sb` 是 `sandbox-exec` 用的 macOS sandbox profile 正本(檔案系統隔離為主:唯讀為預設,寫入白名單;網路無法全禁,靠檔案系統層隔離)。**taster 自 Phase 7 起已佈線**——`ClaudePtySession::spawn`(`src-tauri/src/adapters/pty.rs` 的 `taster_argv()`)在 `config_dir` 為 `Some` 時,把原本的裸 `claude` 包成 `sandbox-exec -p <inline profile> -D WORKDIR=… -D CONFIG_DIR=… claude`。**cyrano(`spawn_continue`)刻意仍未套用**——目前只有 Claude Code 權限層(deny 一切工具、僅 allow 白名單目錄的 `Read`)做隔離,OS sandbox 留待未來獨立評估。
+`templates/sandbox/clacks.sb` 是 `sandbox-exec` 用的 macOS sandbox profile 正本(檔案系統隔離為主:唯讀為預設,寫入白名單;網路無法全禁,靠檔案系統層隔離)。**taster 自 Phase 7 起已佈線**——`ClaudePtySession::spawn`(`src-tauri/src/adapters/pty.rs` 的 `taster_argv()`)在 `config_dir` 為 `Some` 時,把原本的裸 `claude` 包成 `sandbox-exec -p <inline profile> -D WORKDIR=… -D CONFIG_DIR=… claude`。**cyrano 自 Phase 8 起同樣套用本 profile**(`-D WORKDIR=` 指向 cyrano 工作目錄)。⚠ 本 profile 是**寫入**隔離(`(allow default)`),讀取未在 OS 層封閉;cyrano 的讀取範圍由 Claude Code 權限層限縮(已移除裸 `Read` allow,讀取範圍 = 工作目錄 + `--add-dir` 唯讀目錄,其餘觸發人工核准)。
 
 ⚠️ `templates/sandbox/` 是 `templates/` 底下**唯一不由 `cp -R` 部署**的子目錄:`clacks.sb` 的內容經 `include_str!` 在編譯期內嵌進 Rust 二進位,執行期用 `-p` 傳 inline 字串,不會在執行期解析檔案路徑。改 `clacks.sb` 的內容之後,要讓改動生效必須 `cargo build`(或 `cargo run`/`cargo test`),**不是** `cp -R` 到 `../clacks-runtime/`——那裡本來就沒有這個檔案。
 
