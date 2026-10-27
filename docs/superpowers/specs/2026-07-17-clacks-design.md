@@ -95,7 +95,7 @@
 
 > 追加於 walking skeleton 實作後。不影響骨架範圍;此處先定需求與安全含義。
 >
-> ⚠ **狀態(截至 Phase 7):整節皆未實作**。原文寫「實作排入 Phase 3+」,實際上 Phase 3-7 各有自己的主題(core/orchestrator、真管線、GUI、hook 競態、sandbox),本節從未被排進任何一份 plan。目前 Rust 端**沒有任何白名單或 chat_id 過濾**,所有收到的訊息一律進 pipeline。動工前請注意本節的兩項功能都會**擴大攻擊面**(群組模式引入多發言者的不可信輸入),而 cyrano 的隔離缺口(見下方安全模型表)尚未補齊——建議先補防線再擴功能。
+> ⚠ **狀態(截至 Phase 7):整節皆未實作**。原文寫「實作排入 Phase 3+」,實際上 Phase 3-7 各有自己的主題(core/orchestrator、真管線、GUI、hook 競態、sandbox),本節從未被排進任何一份 plan。目前 Rust 端**沒有任何白名單或 chat_id 過濾**,所有收到的訊息一律進 pipeline。動工前請注意本節的兩項功能都會**擴大攻擊面**(群組模式引入多發言者的不可信輸入),而 cyrano 的讀取範圍已在 Phase 8 收斂(Claude Code 權限層;OS 層讀取封閉仍未做,見下方安全模型表)——動工前請確認擴大攻擊面的代價是否值得。
 > 測試 bot:@ChatSummary_37927_bot(與 nexus 的 @backlog_general_bot 隔離,避免污染其 capture 資料流)。
 
 ### 模式一:群組對話
@@ -128,8 +128,8 @@ bot 加入指定 chat group,回覆一句對話時,取該群組**前 3~5 句訊�
 
 | 層 | taster（消毒者） | cyrano（回應者） |
 |---|---|---|
-| **Claude Code 權限** | 專屬 settings：deny 所有工具（Bash/Edit/Write/Read/Web 全鎖），純文字分析 | 專屬 settings:deny `Bash`/`Edit`/`Write`/`Glob`/`Grep`/`WebFetch`/`WebSearch`/`Task`/`NotebookEdit`,allow `Read`。⚠ **原規劃的「path 限定白名單專案目錄」尚未實作**——[settings.json](../../../templates/cyrano/.claude/settings.json) 的 allow 是裸的 `Read`,無路徑限定,啟動指令也沒有用 `--add-dir` 限縮;加上 OS sandbox 未接線(見下列),cyrano 目前可讀取其行程權限所及的任何檔案 |
-| **OS sandbox** | macOS `sandbox-exec` profile：**檔案系統隔離為主**——`deny file-write*` + 白名單（工作目錄的 transcript / outbox、`CLAUDE_CONFIG_DIR` 指向的設定目錄、`/dev/null` 等必要 device、tmp）。**網路無法全禁**（CLI 必須連 Anthropic API），僅能限制到「允許 API 連線」。**已接線**（Phase 7，見 [phase7 設計](2026-07-25-phase7-sandbox-exec-taster-design.md)） | **設計上該有，尚未接線**——原規劃為「同左 + 白名單專案目錄唯讀」，profile 細節未落地。Phase 7 只接 taster（直接碰不可信輸入、風險最高的一端），cyrano 留待未來獨立評估。目前 cyrano 的隔離只有 Claude Code 權限層(deny 其餘工具、allow **無路徑限定**的 `Read`——見上列的落差註記)。兩層皆未限縮讀取範圍,是目前最大的單一缺口 |
+| **Claude Code 權限** | 專屬 settings：deny 所有工具（Bash/Edit/Write/Read/Web 全鎖），純文字分析 | 專屬 settings:deny `Bash`/`Edit`/`Write`/`Glob`/`Grep`/`WebFetch`/`WebSearch`/`Task`/`NotebookEdit`。**已移除原本裸的 `Read` allow 規則**(Phase 8)——裸工具名在 Claude Code 的規則語意裡代表任何路徑,等同放行整台機器。現在 cyrano 的讀取範圍是工作目錄 + 啟動時 `--add-dir` 指定的唯讀專案目錄(路徑由 repo 根的 `clacks.config.json` 提供),其餘路徑會觸發人工核准。見 [phase8 設計](2026-07-26-phase8-cyrano-isolation-design.md) |
+| **OS sandbox** | macOS `sandbox-exec` profile：**檔案系統隔離為主**——`deny file-write*` + 白名單（工作目錄的 transcript / outbox、`CLAUDE_CONFIG_DIR` 指向的設定目錄、`/dev/null` 等必要 device、tmp）。**網路無法全禁**（CLI 必須連 Anthropic API），僅能限制到「允許 API 連線」。**已接線**（Phase 7，見 [phase7 設計](2026-07-25-phase7-sandbox-exec-taster-design.md)） | **已接線**(Phase 8):與 taster 共用同一份 [clacks.sb](../../../templates/sandbox/clacks.sb),`-D WORKDIR=` 指向 cyrano 工作目錄。⚠ 這層是**寫入**隔離——profile 的 `(allow default)` 表示**讀取未在 OS 層封閉**,限縮讀取的是上列的 Claude Code 權限層。真正的 OS 層讀取封閉(`deny file-read*` + 讀取白名單)是 Phase 8 明列的刻意不做,爆炸半徑需獨立一輪配合真機探測,目前仍是 cyrano 隔離的最大剩餘缺口 |
 | **資料驗證** | 輸出必須符合 JSON 契約，Rust 嚴格驗證（空回覆 / 格式不符一律判 failed，不放行） | 輸入只有消毒後純文字；回覆由 Rust 送出，碰不到 bot token |
 
 taster「無記憶 + 零工具」是 injection 防禦的關鍵：攻擊訊息既無工具可劫持、無歷史可污染，唯一輸出又被 schema 卡死。

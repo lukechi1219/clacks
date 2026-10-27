@@ -38,6 +38,7 @@ clacks/
 ├── src-tauri/src/
 │   ├── core/            # 純邏輯層 — 不碰 IO、不依賴 tokio/tauri
 │   │   ├── pipeline.rs       # 訊息生命週期狀態機(Idle/Busy/Failed、timeout 決策)
+│   │   ├── config.rs         # clacks.config.json 剖析(純函式;讀檔在 adapters)
 │   │   ├── contract.rs       # taster JSON 契約型別 + 嚴格 schema 驗證
 │   │   ├── envelope.rs       # 不可信訊息的信封包裝(消毒指示模板)
 │   │   └── session.rs        # /clear、/compact 觸發決策(輸入估算值,輸出決定)
@@ -46,6 +47,7 @@ clacks/
 │   ├── adapters/        # port 的具體實作
 │   │   ├── telegram.rs       # TelegramGateway:reqwest 直打 Bot API
 │   │   ├── pty.rs            # CliSession:portable-pty 管理互動式 claude
+│   │   ├── config_file.rs    # 設定檔載入 + 唯讀目錄 .claude 注入面防護(不實作 port)
 │   │   ├── outbox.rs         # notify 監看 outbox/,轉成事件餵給 orchestrator
 │   │   └── store.rs          # MessageStore:rusqlite(update_id 去重、訊息歷史)
 │   ├── app.rs           # orchestrator:驅動 pipeline,只依賴 core + ports
@@ -56,6 +58,7 @@ clacks/
 │       ├── pipeline.rs       # dev-only headless 組裝點(Phase 5 起降級,見檔頭)
 │       └── smoke.rs          # Phase 2 echo 管線 smoke(config_dir=None 的基準線)
 ├── src/                 # React 前端 — 不分層(兩塊 xterm.js pane + 狀態顯示,保持薄)
+├── clacks.config.json   # 非機密設定(gitignore;範本為 clacks.config.example.json)
 ├── templates/           # runtime 工作目錄的版控正本(角色 CLAUDE.md、settings、hooks);部署 = cp -R 到 ../clacks-runtime/
 └── (repo 外)../clacks-runtime/   # taster/、cyrano/ 工作目錄(CLAUDE.md 角色指示、settings、outbox)
                          # 必須在 repo 目錄樹外:祖先 CLAUDE.md 遍歷跨 git 邊界,嵌套會污染
